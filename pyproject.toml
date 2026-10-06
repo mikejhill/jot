@@ -7,12 +7,30 @@ authors = [
     { name = "Mike Hill", email = "mike@mikejhill.com" }
 ]
 requires-python = ">=3.13"
+keywords = ["tasks", "todo", "agents", "claude", "codex", "copilot", "cli", "sqlite"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Environment :: Web Environment",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Office/Business :: Scheduling",
+    "Topic :: Software Development",
+    "Typing :: Typed",
+]
 dependencies = [
     "claude-agent-sdk>=0.2.163",
     "fastapi>=0.142.2",
     "pydantic>=2.12.2",
     "typer>=0.27.2",
 ]
+
+[project.urls]
+Homepage = "https://github.com/mikejhill/jot"
+Issues = "https://github.com/mikejhill/jot/issues"
 
 [project.scripts]
 jot = "jot.__main__:Application.main"

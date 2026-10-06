@@ -1,5 +1,8 @@
 # jot
 
+[![CI](https://github.com/mikejhill/jot/actions/workflows/ci.yml/badge.svg)](https://github.com/mikejhill/jot/actions/workflows/ci.yml)
+![Python 3.13+](https://img.shields.io/badge/python-3.13%2B-blue)
+
 Lightweight task capture with agent drawdown. Jot is a local SQLite task tracker with a CLI, a web UI, and agent skills. You type a quick note, and an LLM turns it into a structured task. When you want the work done, Claude, Codex, or Copilot draws it down with conflict-free claims. Everything runs locally; no hosted service is required.
 
 ```text
@@ -14,10 +17,12 @@ jot add "orbit api - health check is simple ping; need to make holistic"
 Requires Python 3.13+ and [uv](https://docs.astral.sh/uv/). Each agent backend is optional; install whichever ones you use: Claude Code (`claude auth login`), Codex CLI, or GitHub Copilot CLI. Jot uses their existing logins and needs no API keys.
 
 ```bash
-uv tool install --editable .   # run from the repo root; puts `jot` on PATH
+uv tool install git+https://github.com/mikejhill/jot   # puts `jot` on PATH
 jot install-skills --target claude --target codex --target copilot
 jot serve --open                                        # http://127.0.0.1:8765
 ```
+
+From a clone, use `uv tool install --editable .` so code changes apply without reinstalling. A PyPI release is planned.
 
 Data lives in `JOT_HOME` (default `~/.jot`). Point separate installs or contexts at different homes to keep their data apart.
 
@@ -105,9 +110,21 @@ To add a provider, write one class and register it in `jot/agents/registry.py`.
 ## Development
 
 ```bash
+git clone https://github.com/mikejhill/jot && cd jot
 uv sync
-uv run poe check     # ruff format/lint, ty (strict), pytest + coverage
-uv run jot serve --port 8765
+uv run poe check                     # ruff format/lint, ty (strict), pytest + 90% coverage gate
+node --test tests/server/ui.test.mjs # UI component tests (no browser needed)
+JOT_HOME=.smoke-home uv run jot serve --port 8766   # dev server with throwaway data
 ```
 
-Layout: `src/jot/{db,core,agents,services,server,static,skills}`. The CLI is in `cli.py` (core commands) and `cli_agents.py` (agent commands).
+Layout: `src/jot/{db,core,agents,services,server,static,skills}`. The CLI is in `cli.py` (core commands) and `cli_agents.py` (agent commands). Schema changes are versioned migrations in `db/migrations.py`.
+
+### Contributing
+
+All changes go through pull requests against `main`:
+
+1. Create a branch (`feat/…`, `fix/…`, `chore/…`), or let `jot run` make a `jot/<id>-<slug>` worktree branch.
+2. Keep `uv run poe check` green. CI runs lint and strict type checks, tests on Linux, macOS, and Windows (Python 3.13 and 3.14), the UI tests, and a wheel build plus smoke test.
+3. Open a PR using the template and merge once CI passes.
+
+Dependabot keeps GitHub Actions and the Python dependencies up to date.

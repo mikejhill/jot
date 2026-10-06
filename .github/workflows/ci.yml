@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint & type check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - name: Ruff format
+        run: uv run poe format-check
+      - name: Ruff lint
+        run: uv run poe lint
+      - name: ty (strict)
+        run: uv run poe typecheck
+
+  test:
+    name: Tests (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python }}
+      - run: uv sync --locked
+      - name: Configure git identity (tests create repositories)
+        run: |
+          git config --global user.name "ci"
+          git config --global user.email "ci@example.invalid"
+      - name: pytest with coverage
+        run: uv run poe test
+
+  ui:
+    name: UI tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: node --test tests/server/ui.test.mjs
+
+  build:
+    name: Build distribution
+    runs-on: ubuntu-latest
+    needs: [lint, test, ui]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv build
+      - name: Check metadata
+        run: uvx twine check --strict dist/*
+      - name: Smoke-test the wheel
+        run: |
+          uv venv /tmp/smoke
+          uv pip install --python /tmp/smoke dist/*.whl
+          JOT_HOME=/tmp/jot-home /tmp/smoke/bin/jot add "smoke test" --json
+          JOT_HOME=/tmp/jot-home /tmp/smoke/bin/jot ls --json
+          test -f "$(/tmp/smoke/bin/python -c 'import jot, pathlib; print(pathlib.Path(jot.__file__).parent / "skills/jot/SKILL.md")')"
+          test -f "$(/tmp/smoke/bin/python -c 'import jot, pathlib; print(pathlib.Path(jot.__file__).parent / "static/index.html")')"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
