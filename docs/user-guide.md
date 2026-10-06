@@ -64,6 +64,8 @@ jot runs 12; jot log <run-id>
 - **List:** a **? N questions** badge on the row. Click it to expand the row and answer inline.
 - **Board:** the same badge on the card.
 
+![Questions for you, at the top of the task panel](images/task-questions.png)
+
 What the button does depends on the task's status:
 
 - **Waiting on you** (`needs_input`, a run paused to ask): **Send answers and continue** saves your answers and resumes that run (plan or execute). Blank answers leave the decision to the agent.
