@@ -276,7 +276,7 @@ class CommandLine:
     def move(self, task_id: int, status: Status, *, json: JsonOption = False) -> None:
         """Move a task through its effective flow."""
         with self.session(json=json) as (_db, workflow, _home):
-            task = workflow.move(task_id, status)
+            task = workflow.move(task_id, status, manual=True)
             self.emit(
                 task.model_dump(mode="json"), f"{task.id}: {task.status}\n", json=json
             )

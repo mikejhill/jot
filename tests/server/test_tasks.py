@@ -47,7 +47,8 @@ class TestTasks:
             "status",
             "comment",
         }
-        assert "planning" in detail["transitions"]
+        assert "planning" not in detail["transitions"]
+        assert "blocked" in detail["transitions"]
         assert client.delete(url).json() == {"deleted": True}
         assert client.get("/api/tasks").json() == []
         assert client.get("/api/tasks?include_deleted=true").json()[0]["deleted_at"]

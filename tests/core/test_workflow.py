@@ -263,3 +263,17 @@ class TestWorkflow:
         monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2]))
         results = ClaimWorker.race([(str(home.database), 0, True)] * 8, home.path)
         assert sorted(results) == ids
+
+
+class TestManualMoves:
+    """User-initiated moves cannot fake a run, and stuck runs can recover."""
+
+    def test_manual_guard_and_recovery(self, db: Database) -> None:
+        """Manual moves into planning fail; an unclaimed planning task returns."""
+        workflow = Workflow(db)
+        task = TaskRepository(db).create(Task(title="t", raw_input="t"))
+        workflow.move(task.id, Status.READY)
+        with pytest.raises(WorkflowError, match="starting a run"):
+            workflow.move(task.id, Status.PLANNING, manual=True)
+        workflow.move(task.id, Status.PLANNING)
+        assert workflow.move(task.id, Status.READY, manual=True).status is Status.READY

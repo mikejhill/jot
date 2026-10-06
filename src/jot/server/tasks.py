@@ -6,7 +6,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Query
 
-from jot.core.models import EventKind, Task, TaskEvent
+from jot.core.models import EventKind, Status, Task, TaskEvent
 from jot.core.prioritize import Prioritizer
 from jot.db.query import TaskQuery
 from jot.exceptions import RepositoryError, WorkflowError
@@ -96,6 +96,8 @@ class TaskRoutes:
         workflow = self._access.runtime.workflow
         result: list[str] = []
         for target in type(task.status):
+            if target in {Status.PLANNING, Status.EXECUTING}:
+                continue  # entered only by starting a run
             try:
                 workflow.validate(
                     task.status,
@@ -125,7 +127,7 @@ class TaskRoutes:
     async def move(self, task_id: int, body: Move) -> Task:
         """Move only through a valid domain transition."""
         runtime = self._access.runtime
-        task = runtime.workflow.move(task_id, body.status, actor="ui")
+        task = runtime.workflow.move(task_id, body.status, actor="ui", manual=True)
         runtime.changed(task_id)
         return task
 

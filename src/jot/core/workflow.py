@@ -64,9 +64,12 @@ class Workflow:
             valid = target == Status.ARCHIVED
         if current in sequence[:-1] or current == Status.BLOCKED:
             valid = valid or target in {Status.BLOCKED, Status.WONT_DO, Status.ARCHIVED}
-        if current in {Status.REVIEW, Status.AWAITING_APPROVAL} and (
-            target == Status.READY
-        ):
+        if current in {
+            Status.REVIEW,
+            Status.AWAITING_APPROVAL,
+            Status.PLANNING,
+            Status.EXECUTING,
+        } and (target == Status.READY):
             valid = True
         if current == target or not valid:
             raise WorkflowError(f"Invalid {flow} transition: {current} -> {target}")
@@ -78,13 +81,21 @@ class Workflow:
         *,
         actor: str = "cli",
         flow: Flow | None = None,
+        manual: bool = False,
     ) -> Task:
-        """Move an unclaimed task through the validated status machine."""
+        """Move an unclaimed task through the validated status machine.
+
+        Manual (user) moves may not enter planning/executing; only runs do.
+        """
         with self.db.write():
             task = self.tasks.get(task_id)
             if task.deleted_at is not None or task.claimed_by is not None:
                 raise WorkflowError(
                     "Release the claim or restore the task before moving it"
+                )
+            if manual and target in {Status.PLANNING, Status.EXECUTING}:
+                raise WorkflowError(
+                    f"{target} is set by starting a run (Plan / Run now), not by a move"
                 )
             resolved = self.flow_for(task, flow)
             self.validate(
