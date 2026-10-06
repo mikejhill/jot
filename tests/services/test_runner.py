@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
 import subprocess
+import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -284,6 +286,61 @@ class TestWorkspaces:
             return await harness.service.wait(run.id)
 
         assert asyncio.run(scenario()).worktree is None
+
+
+class SleepyGit(GitWorkspaces):
+    """A 'git' that is really a long-running Python process."""
+
+    executable = sys.executable
+
+
+class TestGitCancellation:
+    """Cancelling during a git command kills the git process."""
+
+    def test_cancel_kills_git(self, tmp_path: Path) -> None:
+        """A cancelled git call leaves no running process behind."""
+        git = SleepyGit(tmp_path / "wt")
+        marker = tmp_path / "pid.txt"
+        script = (
+            "import os, pathlib, time; "
+            f"pathlib.Path({str(marker)!r}).write_text(str(os.getpid())); "
+            "time.sleep(30)"
+        )
+
+        async def scenario() -> None:
+            call = asyncio.ensure_future(git._git(tmp_path, "-c", script))
+            for _ in range(100):
+                if marker.exists():
+                    break
+                await asyncio.sleep(0.05)
+            call.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await call
+
+        asyncio.run(scenario())
+        pid = int(marker.read_text())
+        assert not ProcessCheck.alive(pid)
+
+
+class ProcessCheck:
+    """Cross-platform liveness check for a process id."""
+
+    @staticmethod
+    def alive(pid: int) -> bool:
+        """Return True if the process still exists."""
+        if sys.platform == "win32":
+            listing = subprocess.run(  # noqa: S603 - fixed system tool
+                ["tasklist", "/FI", f"PID eq {pid}", "/NH"],  # noqa: S607
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            return str(pid) in listing.stdout
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return False
+        return True
 
 
 class TestPlanOutcome:

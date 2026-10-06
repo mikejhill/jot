@@ -38,6 +38,8 @@ class GitWorkspaces:
     ``$JOT_HOME/worktrees``, which keeps worktrees out of project folders.
     """
 
+    executable: str = "git"
+
     def __init__(self, root: Path) -> None:
         self.root = root
 
@@ -127,7 +129,7 @@ class GitWorkspaces:
         """Run git and return (exit code, combined output)."""
         try:
             process = await asyncio.create_subprocess_exec(
-                "git",
+                self.executable,
                 *args,
                 cwd=cwd,
                 stdout=asyncio.subprocess.PIPE,
@@ -135,5 +137,12 @@ class GitWorkspaces:
             )
         except OSError as err:
             raise WorkspaceError(f"cannot run git: {err}") from err
-        out, _ = await process.communicate()
+        try:
+            out, _ = await process.communicate()
+        except BaseException:
+            # A cancelled run must not leave git running in its workspace.
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+            raise
         return process.returncode or 0, out.decode("utf-8", errors="replace")
