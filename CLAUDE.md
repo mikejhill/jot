@@ -1,7 +1,8 @@
 # Claude guidelines for jot (same as AGENTS.md)
 
 - **Workflow:** interactive sessions may commit directly to `main` in the main worktree, unless other work is already in progress there; then use a branch. Work done in worktrees that Jot creates (`jot/<id>-<slug>` branches under `$JOT_HOME/worktrees`) is reviewed and merged through a pull request (`gh pr create`, filling in `.github/pull_request_template.md`).
-- **Toolchain:** uv only. `uv run poe check` must pass before a PR (ruff format and lint, ty with every rule set to error, pytest with a 90% coverage gate). If you touch `src/jot/static/`, also run `node --test tests/server/ui.test.mjs`.
+- **Toolchain:** uv only. `uv run poe check` must pass before a PR (ruff format and lint, ty with every rule set to error, pytest with a 90% coverage gate). If you touch `src/jot/static/`, also run `node --test tests/server/ui.test.mjs` and `uv run poe e2e` (browser tests), and regenerate screenshots with `uv run poe screenshots` when the UI changes visibly.
 - **Code style:** class-based design, a docstring on every module, class, and method, `from __future__ import annotations`, no `Any`, and app errors that subclass `AppError` (`src/jot/exceptions.py`). Match the surrounding code.
 - **Data safety:** never use or modify the real data home (`~/.jot`) in tests or manual checks. Use a temporary `JOT_HOME`, such as the gitignored `.smoke-home/`. Schema changes need a new version in `src/jot/db/migrations.py` plus a test that upgrades an older database.
 - **Agents:** all LLM access goes through `jot.agents.base.AgentBackend`. Add a provider as one class plus an entry in `agents/registry.py`. Tests use `FakeBackend` and never call real CLIs.
+- **Docs:** repository docs that aren't conventional root files (README, CONTRIBUTING, LICENSE, AGENTS/CLAUDE) go in `docs/`, with images in `docs/images/`.

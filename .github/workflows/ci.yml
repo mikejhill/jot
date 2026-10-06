@@ -62,10 +62,33 @@ jobs:
           node-version: "22"
       - run: node --test tests/server/ui.test.mjs
 
+  e2e:
+    name: Browser tests & screenshots
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - name: Playwright end-to-end UI tests (preinstalled Chrome)
+        run: uv run poe e2e --tracing retain-on-failure --output .tmp/playwright
+      - name: Generate screenshots
+        run: uv run python -m jot.demo .tmp/screenshots
+      - uses: actions/upload-artifact@v7
+        with:
+          name: screenshots
+          path: .tmp/screenshots/
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: playwright-traces
+          path: .tmp/playwright/
+
   build:
     name: Build distribution
     runs-on: ubuntu-latest
-    needs: [lint, test, ui]
+    needs: [lint, test, ui, e2e]
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7

@@ -356,7 +356,7 @@ class App extends Component {
       return html`<section class="column" onDragOver=${e => e.preventDefault()} onDrop=${e => {e.preventDefault(); const id = Number(e.dataTransfer.getData('text/plain')); if (id) this.move(id,status);}}>
         <h2><span class=${'dot ' + status}></span>${human(status)}<span class="count">${tasks.length}</span></h2>
         ${tasks.map(t => html`<button class="card" draggable=${!t.claimed_by} onDragStart=${e => e.dataTransfer.setData('text/plain',String(t.id))} onClick=${() => this.openTask(t.id)}>
-          <small>#${t.id} · ${this.state.projects.find(p => p.id === t.project_id)?.name || 'Personal'}</small><strong>${t.title}</strong>
+          <small>#${t.id} · ${this.state.projects.find(p => p.id === t.project_id)?.name || 'No project'}</small><strong>${t.title}</strong>
           ${t.needs_enrichment && t.status === "inbox" && html`<span class="enriching">inbox · enriching…</span>`}
           ${t.status === 'needs_input' && html`<span class="needs-input">Waiting for your answers</span>`}
           <div class="chips">${pill(t.criticality)}${pill(t.type)}${t.labels.map(label => pill(label))}</div>

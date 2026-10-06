@@ -79,7 +79,8 @@ include = ["src", "tests"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-addopts = ["--strict-markers", "--strict-config", "-ra", "--import-mode=importlib"]
+addopts = ["--strict-markers", "--strict-config", "-ra", "--import-mode=importlib", "-m", "not e2e"]
+markers = ["e2e: browser end-to-end UI tests (run with `poe e2e`)"]
 xfail_strict = true
 
 [tool.coverage.run]
@@ -99,6 +100,8 @@ lint = { cmd = "ruff check .", help = "Lint code" }
 lint-fix = { cmd = "ruff check . --fix", help = "Lint and auto-fix" }
 typecheck = { cmd = "ty check", help = "Type check strictly" }
 test = { cmd = "pytest --cov", help = "Run tests with coverage" }
+e2e = { cmd = "pytest -m e2e --browser-channel chrome -p no:cacheprovider", help = "Run browser UI tests (needs Chrome)" }
+screenshots = { cmd = "python -m jot.demo docs/images", help = "Regenerate documentation screenshots" }
 fix = { sequence = ["format", "lint-fix"], help = "Format and fix lint" }
 check = { sequence = ["format-check", "lint", "typecheck", "test"], help = "Run every quality gate" }
 
@@ -107,6 +110,7 @@ dev = [
     "poethepoet>=0.48.0",
     "pytest>=9.1.1",
     "pytest-cov>=7.1.0",
+    "pytest-playwright>=0.9.0",
     "ruff>=0.16.10",
     "ty>=0.0.84",
 ]
