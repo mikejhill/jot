@@ -33,6 +33,7 @@ ModelOption = Annotated[
     str | None,
     typer.Option("--model", help="Model for this action (e.g. opus, gpt-6-astra)"),
 ]
+LEGACY_SKILLS = ("jot-capture", "jot-drawdown", "jot-cleanup", "jot-groom")
 SKILL_TARGETS = {
     "claude": Path(".claude") / "skills",
     "codex": Path(".codex") / "skills",
@@ -345,8 +346,10 @@ class AgentCommands:
         ] = None,
         json: JsonFlag = False,
     ) -> None:
-        """Copy the jot-capture/drawdown/cleanup skills into agent skill folders."""
-        source = resources.files("jot") / "skills"
+        """Install the `jot` skill (SKILL.md + references) into agent skill folders.
+
+        Also removes the per-workflow jot-* skills installed by older versions.
+        """
         targets = (
             [dest]
             if dest
@@ -359,14 +362,12 @@ class AgentCommands:
         if not targets:
             self.cli.fail(f"--target must be one of {', '.join(SKILL_TARGETS)}")
         installed: list[str] = []
-        for root in targets:
-            for skill in source.iterdir():
-                if not skill.is_dir() or not skill.name.startswith("jot-"):
-                    continue
-                folder = root / skill.name
-                folder.mkdir(parents=True, exist_ok=True)
-                with resources.as_file(skill / "SKILL.md") as path:
-                    shutil.copyfile(path, folder / "SKILL.md")
+        with resources.as_file(resources.files("jot") / "skills" / "jot") as skill:
+            for root in targets:
+                for legacy in LEGACY_SKILLS:
+                    shutil.rmtree(root / legacy, ignore_errors=True)
+                folder = root / "jot"
+                shutil.copytree(skill, folder, dirs_exist_ok=True)
                 installed.append(str(folder))
         self.cli.emit(
             installed, "".join(f"Installed {p}\n" for p in installed), json=json

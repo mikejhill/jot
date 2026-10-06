@@ -1,8 +1,3 @@
----
-name: jot-groom
-description: Query and optimize the user's Jot task queue. Use when the user asks to find, list, search, summarize, or review Jot tasks ("what's in my queue", "show my jot tasks about X", "which tasks are for project Y"), or to groom the queue by reprioritizing, refining, relabeling, merging, splitting, or picking the best tasks to work next.
----
-
 # Query and groom the Jot queue
 
 Jot (`jot` CLI; data in `$JOT_HOME`, default `~/.jot`) is the user's local task tracker. Read freely. Change tasks only after the user approves the specific changes.
@@ -31,7 +26,7 @@ Summarize what you found as a compact table: id, status, criticality, title. The
 - **Priority:** criticality that doesn't match the impact or urgency in the description; the top 3 to do next, and why.
 - **Clarity:** vague titles or descriptions with no acceptance criteria; tasks stuck in `inbox` that need one answer to become ready.
 - **Structure:** duplicates or overlapping tasks to merge; oversized tasks to split; dependencies (do A before B).
-- **Hygiene:** missing project, labels, or `--repo` path (agents need the repo path to work on code); stale tasks (hand off to the `jot-cleanup` skill).
+- **Hygiene:** missing project, labels, or `--repo` path (agents need the repo path to work on code); stale tasks (hand off to [cleanup.md](cleanup.md)).
 - **Batching:** related tasks that one agent run could handle together.
 
 Base each recommendation on the task text and history (`jot show`). Don't guess.
@@ -56,7 +51,7 @@ jot add "<new task>" --project <slug> --label ... --title "..."   # for splits; 
 
 ## 4. Pick and apply enhancements (hand off to drawdown)
 
-When the user wants the chosen tasks done, use the `jot-drawdown` skill, or Jot's runner:
+When the user wants the chosen tasks done, use [drawdown.md](drawdown.md), or Jot's runner:
 
 ```bash
 jot plan <id> [--backend claude --model opus]     # read-only plan + questions -> awaiting_approval
@@ -64,4 +59,4 @@ jot approve <id> --note "answers" [--model sonnet]
 jot run <id> --direct                              # small, clear tasks
 ```
 
-If the task is about a codebase that is open in this session (e.g. jot itself), you may instead work it in the session using the claim protocol in `jot-drawdown`. Claim the task first so no other agent picks it up.
+If the task is about a codebase that is open in this session (e.g. jot itself), you may instead work it in the session using the claim protocol in [drawdown.md](drawdown.md). Claim the task first so no other agent picks it up.

@@ -38,7 +38,7 @@ Every instruction file can also be edited in the UI (Instructions view).
 
 - **UI:** use the capture bar at the top of every view (`Ctrl+K`, then Enter). The task appears instantly and fills in when enrichment finishes.
 - **CLI:** `jot add "<note>"` returns in about 100 ms. Enrichment runs in the server's background worker, or immediately with `--wait`. You can pre-fill fields with `--project --label --crit --type --title --repo`.
-- **Agents:** the `jot-capture` skill teaches Claude Code, Codex, and Copilot to add tasks for you.
+- **Agents:** the `jot` skill (installed by `jot install-skills`) teaches Claude Code, Codex, and Copilot every Jot workflow: capture, query and groom, drawdown, and cleanup. Its `SKILL.md` routes to one reference file per workflow.
 
 Enrichment reuses existing projects (matched by slug, name, or alias) and existing labels, so labels don't drift into synonyms. A task with clear scope moves to `ready`. An unclear one stays in `inbox` and its open questions are recorded on the task. Set `[triage] backend` in `config.toml` to `claude`, `codex`, or `copilot`.
 
@@ -69,7 +69,7 @@ In the UI, open a task to use **Plan first**, **Run now (direct)**, **Approve**,
 
 - **Where agents work:** the task's `repo_path`, or else the project's `repo_path`, or else a scratch folder. Execution in a git repo happens in a worktree, `<repo>.jot/<id>-<slug>`, on branch `jot/<id>-<slug>`. The agent commits there and never pushes. You review and merge.
 - **No conflicts:** a claim is an atomic conditional update under `BEGIN IMMEDIATE` with a lease that the runner heartbeats. Two agents can never hold the same task. Expired leases are returned to the queue by the server, or by `jot reap`.
-- **External agents:** the `jot-drawdown` skill lets an interactive Claude, Codex, or Copilot session use the same protocol: `jot claim`, then `jot comment --kind plan|question|result`, then `jot release --status …`.
+- **External agents:** the `jot` skill's drawdown workflow lets an interactive Claude, Codex, or Copilot session use the same protocol: `jot claim`, then `jot comment --kind plan|question|result`, then `jot release --status …`.
 - **Permissions:** plan runs are read-only (Claude: read tools only; Codex: `--sandbox read-only`; Copilot: view/grep/glob only). Execute runs have full tool access inside the workspace.
 
 ## Find and clean up
@@ -82,7 +82,7 @@ jot cleanup scan --agent           # heuristics + LLM review using cleanup.md
 jot cleanup apply 3 --approve 0,2  # only approved items; archive / soft-delete / note
 ```
 
-The `jot-cleanup` skill runs the same review conversationally. The `jot-groom` skill queries the queue and suggests changes to apply with your approval: reprioritize, refine, merge or split tasks, fill in missing fields, or pick the next tasks to run. Nothing changes without item-level approval.
+The `jot` skill runs the same review conversationally. It also queries the queue and suggests changes to apply with your approval: reprioritize, refine, merge or split tasks, fill in missing fields, or pick the next tasks to run. Nothing changes without item-level approval.
 
 ## Swapping agent SDKs
 

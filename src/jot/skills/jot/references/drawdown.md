@@ -1,8 +1,3 @@
----
-name: jot-drawdown
-description: Pick up and work tasks from the user's Jot task tracker without conflicting with other agents. Use when the user says "work the next task", "draw down jot", "pick up task 12", "what's next on my list", or asks you to plan, execute, or finish a Jot task.
----
-
 # Draw down Jot tasks
 
 Jot (`jot` CLI, data in `$JOT_HOME`, default `~/.jot`) holds the user's tasks. Several agents may work the list at once, so **always claim before working** and **never touch a task claimed by someone else**.

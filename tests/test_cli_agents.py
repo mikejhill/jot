@@ -130,12 +130,20 @@ class TestCleanupAndSkills:
         cli.run("cleanup", "apply", str(second["id"]), "--approve", "0")
 
     def test_install_skills(self, cli: Cli, tmp_path: Path) -> None:
-        """Every bundled skill is copied into the destination."""
+        """The jot skill and its references are copied; legacy skills removed."""
         dest = tmp_path / "skills"
-        assert len(cli.rows("install-skills", "--dest", str(dest))) == 4
-        names = sorted(p.name for p in dest.iterdir())
-        assert names == ["jot-capture", "jot-cleanup", "jot-drawdown", "jot-groom"]
-        assert (dest / "jot-drawdown" / "SKILL.md").read_text("utf-8").startswith("---")
+        (dest / "jot-capture").mkdir(parents=True)
+        assert len(cli.rows("install-skills", "--dest", str(dest))) == 1
+        assert sorted(p.name for p in dest.iterdir()) == ["jot"]
+        skill = dest / "jot"
+        assert (skill / "SKILL.md").read_text("utf-8").startswith("---")
+        references = sorted(p.name for p in (skill / "references").iterdir())
+        assert references == [
+            "capture.md",
+            "cleanup.md",
+            "drawdown.md",
+            "query-and-groom.md",
+        ]
         cli.run("install-skills", "--target", "nope", code=1)
 
     def test_install_skills_target(
@@ -144,4 +152,4 @@ class TestCleanupAndSkills:
         """Named targets install under the user's home directory."""
         monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path))
         cli.run("install-skills", "--target", "codex")
-        assert (tmp_path / ".codex" / "skills" / "jot-capture" / "SKILL.md").is_file()
+        assert (tmp_path / ".codex" / "skills" / "jot" / "SKILL.md").is_file()

@@ -1,8 +1,3 @@
----
-name: jot-cleanup
-description: Review the user's Jot task list for stale, duplicate, or outdated tasks and clean it up with item-by-item approval. Use when the user asks to "clean up jot", "prune old tasks", "find stale tasks", "tidy my backlog", or for a periodic backlog review.
----
-
 # Clean up Jot tasks (with approval)
 
 Nothing changes without the user approving each item.

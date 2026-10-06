@@ -1,8 +1,3 @@
----
-name: jot-capture
-description: Capture ideas, gaps, bugs, and follow-ups into the user's Jot task tracker. Use when the user says "jot this", "add a task", "track this", "remind me to", "note that we should", or when a conversation surfaces follow-up work worth tracking (missing tests, tech debt, TODOs found while working).
----
-
 # Capture tasks into Jot
 
 Jot is the user's local task tracker (SQLite at `$JOT_HOME`, default `~/.jot`), driven by the `jot` CLI.
