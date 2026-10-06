@@ -292,13 +292,14 @@ class SleepyGit(GitWorkspaces):
     """A 'git' that is really a long-running Python process."""
 
     executable = sys.executable
+    cancel_grace = 0.3
 
 
 class TestGitCancellation:
-    """Cancelling during a git command kills the git process."""
+    """Cancelling during a git command lets it finish briefly, then stops it."""
 
     def test_cancel_kills_git(self, tmp_path: Path) -> None:
-        """A cancelled git call leaves no running process behind."""
+        """A git call that outlives the grace period is killed on cancel."""
         git = SleepyGit(tmp_path / "wt")
         marker = tmp_path / "pid.txt"
         script = (

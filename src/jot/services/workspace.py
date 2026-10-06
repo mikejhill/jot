@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import logging
 import re
@@ -39,6 +40,10 @@ class GitWorkspaces:
     """
 
     executable: str = "git"
+    # On cancel, let a running git command finish for up to this long. Killing it
+    # outright is not enough on Windows: git.exe is a launcher whose child keeps
+    # writing to the repository after the launcher dies.
+    cancel_grace: float = 10.0
 
     def __init__(self, root: Path) -> None:
         self.root = root
@@ -125,6 +130,17 @@ class GitWorkspaces:
             parts.append("Uncommitted:\n" + pending.strip())
         return "\n".join(part for part in parts if part)
 
+    async def _settle(self, process: asyncio.subprocess.Process) -> None:
+        """Wait (bounded) for an interrupted git command, then kill it if needed."""
+        if process.returncode is not None:
+            return
+        try:
+            await asyncio.shield(asyncio.wait_for(process.wait(), self.cancel_grace))
+        except (TimeoutError, asyncio.CancelledError):
+            with contextlib.suppress(ProcessLookupError):
+                process.kill()  # no-op race if it exited in the meantime
+            await process.wait()
+
     async def _git(self, cwd: Path, *args: str) -> tuple[int, str]:
         """Run git and return (exit code, combined output)."""
         try:
@@ -140,9 +156,6 @@ class GitWorkspaces:
         try:
             out, _ = await process.communicate()
         except BaseException:
-            # A cancelled run must not leave git running in its workspace.
-            if process.returncode is None:
-                process.kill()
-                await process.wait()
+            await self._settle(process)
             raise
         return process.returncode or 0, out.decode("utf-8", errors="replace")
