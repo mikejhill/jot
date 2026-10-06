@@ -5,6 +5,8 @@ from __future__ import annotations
 import pytest
 from playwright.sync_api import Page, expect
 
+from jot.demo import DemoServer
+
 pytestmark = pytest.mark.e2e
 
 
@@ -13,6 +15,7 @@ class TestBoardAndCapture:
 
     def test_board_columns_and_cards(self, app: Page) -> None:
         """The board shows status columns and seeded cards with labels."""
+        app.get_by_role("button", name="Board").click()
         for column in ("Inbox", "Ready", "Awaiting Approval", "Review"):
             expect(app.locator(".column", has_text=column).first).to_be_visible()
         card = app.locator(".card", has_text="Rate-limit the public scoring endpoint")
@@ -25,15 +28,43 @@ class TestBoardAndCapture:
         expect(app.locator("#capture")).to_be_focused()
         app.keyboard.type("orbit api - add request tracing")
         app.keyboard.press("Enter")
-        expect(app.locator(".card", has_text="add request tracing")).to_be_visible()
+        expect(app.get_by_text("add request tracing").first).to_be_visible()
 
-    def test_theme_toggle(self, app: Page) -> None:
-        """The theme button switches to dark mode."""
-        app.get_by_role("button", name="Toggle light and dark theme").click()
-        theme = app.evaluate("document.documentElement.dataset.theme")
-        assert theme in {"dark", "light"}
-        app.get_by_role("button", name="Toggle light and dark theme").click()
-        assert app.evaluate("document.documentElement.dataset.theme") != theme
+    def test_theme_cycles_system_light_dark(self, app: Page) -> None:
+        """The theme button cycles System → Light → Dark → System and persists."""
+        root = "document.documentElement.dataset.theme"
+        assert app.evaluate(root) == ""
+        for label, value in (("Light", "light"), ("Dark", "dark"), ("System", "")):
+            app.locator("button.theme").click()
+            assert app.evaluate(root) == value
+            expect(app.locator("button.theme")).to_have_attribute(
+                "title", f"{label} theme"
+            )
+        app.locator("button.theme").click()
+        app.reload()
+        app.locator("#capture").wait_for()
+        assert app.evaluate(root) == "light"
+
+
+class TestRoutes:
+    """List is the default view; pages and tasks have shareable links."""
+
+    def test_default_view_is_list(self, app: Page) -> None:
+        """Opening the app shows the List view."""
+        expect(app.locator("h1")).to_have_text("List")
+
+    def test_task_links_open_and_close(self, app: Page, server: DemoServer) -> None:
+        """A #/view/task/<id> link opens the drawer; closing updates the hash."""
+        app.goto(f"{server.url}/#/board/task/2")
+        expect(app.locator(".drawer")).to_contain_text("Task #2")
+        expect(app.locator("h1")).to_have_text("Board")
+        app.keyboard.press("Escape")
+        expect(app.locator(".drawer")).to_have_count(0)
+        assert app.evaluate("location.hash") == "#/board"
+        app.get_by_role("button", name="Runs").click()
+        assert app.evaluate("location.hash") == "#/runs"
+        app.go_back()
+        expect(app.locator("h1")).to_have_text("Board")
 
 
 class TestTaskDrawer:
@@ -41,7 +72,7 @@ class TestTaskDrawer:
 
     def test_run_output_markdown_usage_and_collapsed_steps(self, app: Page) -> None:
         """Agent Markdown renders; tool/thinking collapse; usage shows per turn."""
-        app.locator(".card", has_text="Retry failed exports").click()
+        app.get_by_role("button", name="Retry failed exports with backoff").click()
         log = app.locator(".drawer .run-log").first
         expect(log.locator("table")).to_be_visible()
         expect(log.locator("h2", has_text="Summary")).to_be_visible()
@@ -56,7 +87,7 @@ class TestTaskDrawer:
 
     def test_structured_plan_and_readable_timeline(self, app: Page) -> None:
         """Plan JSON renders as sections; system events read as sentences."""
-        app.locator(".card", has_text="Add functional health checks").click()
+        app.get_by_role("button", name="Add functional health checks").click()
         structured = app.locator(".drawer .run-log .structured").first
         expect(structured.locator("h5", has_text="Plan")).to_be_visible()
         expect(structured.locator("ol").last.locator("li")).to_have_count(2)
@@ -71,7 +102,6 @@ class TestListView:
 
     def test_row_actions_and_inline_plan(self, app: Page) -> None:
         """Rows offer actions by status; expanding shows the plan and questions."""
-        app.get_by_role("button", name="List").click()
         ready = app.locator("tr", has_text="Rate-limit the public scoring endpoint")
         expect(ready.get_by_role("button", name="Plan")).to_be_visible()
         expect(ready.get_by_role("button", name="Run now")).to_be_visible()

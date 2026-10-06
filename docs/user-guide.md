@@ -93,7 +93,7 @@ Open a task to see its runs and timeline:
 - **Usage:** after every turn, a line shows the model plus input, output, cache-read, and cache-write tokens, and each run shows its total. Claude's per-turn figures come from the API's final `message_delta` usage. Codex reports per turn (input net of cached input). The Copilot CLI reports only the model and premium requests, not tokens.
 - **Timeline:** system events read as sentences ("ready → planning (claim)", "Label added: idea").
 
-The UI follows your OS theme, or use the toggle in the top bar:
+**Links and theme.** Every view and task has a shareable link: `#/list`, `#/board`, `#/runs`, and `#/board/task/12` (opens that task's panel). The browser back and forward buttons work. List is the default view. The theme button in the top bar cycles through System (follows your OS), Light, and Dark, and remembers your choice:
 
 ![Board in dark mode](images/board-dark.png)
 

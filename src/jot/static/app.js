@@ -92,13 +92,20 @@ class ProjectEditor extends Component {
 class App extends Component {
   constructor() {
     super();
-    this.state = {view:'Board', tasks:[], projects:[], runs:[], labels:[], filters:{sort:'priority'}, selected:[], detail:null,
+    this.state = {view:App.route().view, tasks:[], projects:[], runs:[], labels:[], filters:{sort:'priority'}, selected:[], detail:null,
       backend:'claude', picks:App.loadPicks(), config:null, preset:'open', expanded:{}, connected:false, toasts:[], instructionNames:[], instruction:'triage.md', markdown:'', instructionDirty:false,
       proposal:null, approved:[], projectEdit:null, runLogs:{}, openLogs:{}, busy:false, loaded:false};
     this.refreshVersion = 0; this.detailVersion = 0; this.toastId = 0;
   }
   componentDidMount() {
-    document.documentElement.dataset.theme = localStorage.getItem('jot-theme') || '';
+    let theme = '';
+    try { theme = localStorage.getItem('jot-theme') || ''; } catch { /* storage unavailable */ }
+    document.documentElement.dataset.theme = theme;
+    this.setState({theme});
+    // #20: shareable routes, e.g. #/list, #/board/task/12, #/runs.
+    this.hashchange = () => this.applyRoute();
+    window.addEventListener('hashchange', this.hashchange);
+    this.applyRoute();
     this.keydown = e => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {e.preventDefault(); document.getElementById('capture').focus();}
       if (e.key === 'Escape') this.closeDetail();
@@ -166,7 +173,8 @@ class App extends Component {
       return {expanded};
     });
   }
-  async openTask(id, focus = true) {
+  async openTask(id, focus = true, route = focus) {
+    if (route) this.setRoute(this.state.view, id);
     const version = ++this.detailVersion;
     try {
       const detail = await Api.request(`/tasks/${id}`);
@@ -185,7 +193,7 @@ class App extends Component {
     this.setState(s => ({openLogs:{...s.openLogs, [runId]:open}}));
     if (open) this.loadLog(runId);
   }
-  closeDetail() {this.detailVersion++; this.setState({detail:null});}
+  closeDetail(route = true) {this.detailVersion++; this.setState({detail:null}); if (route) this.setRoute(this.state.view, null);}
   async capture(event) {
     event.preventDefault();
     const input = document.getElementById('capture'), text = input.value.trim();
@@ -319,13 +327,38 @@ class App extends Component {
     }
   }
   toggleSelect(id) {this.setState(s => ({selected:s.selected.includes(id) ? s.selected.filter(x => x !== id) : [...s.selected,id]}));}
+  static themes = [['', 'System theme', '◐'], ['light', 'Light theme', '☀'], ['dark', 'Dark theme', '☾']];
   theme() {
-    const dark = document.documentElement.dataset.theme === 'dark' || (!document.documentElement.dataset.theme && matchMedia('(prefers-color-scheme: dark)').matches);
-    const theme = dark ? 'light' : 'dark'; document.documentElement.dataset.theme = theme; localStorage.setItem('jot-theme',theme);
+    // Cycle system → light → dark; '' follows the OS (prefers-color-scheme).
+    const order = App.themes.map(([value]) => value);
+    const next = order[(order.indexOf(this.state.theme) + 1) % order.length];
+    document.documentElement.dataset.theme = next;
+    try { localStorage.setItem('jot-theme', next); } catch { /* storage unavailable */ }
+    this.setState({theme:next});
   }
-  async chooseView(view) {
+  static views = ['Board','List','Runs','Projects','Instructions','Cleanup'];
+  static route(hash = (typeof location === 'undefined' ? '' : location.hash)) {
+    // '#/<view>[/task/<id>]' → {view, task}; unknown or empty → List.
+    const [, view = '', kind = '', id = ''] = hash.replace(/^#/, '').split('/');
+    const match = App.views.find(v => v.toLowerCase() === view.toLowerCase());
+    const task = kind === 'task' && /^\d+$/.test(id) ? Number(id) : null;
+    return {view:match || 'List', task};
+  }
+  static href(view, task = null) { return `#/${view.toLowerCase()}${task ? `/task/${task}` : ''}`; }
+  setRoute(view, task) {
+    const target = App.href(view, task);
+    if (typeof location !== 'undefined' && location.hash !== target) location.hash = target;
+  }
+  async applyRoute() {
+    const {view, task} = App.route();
+    if (view !== this.state.view) await this.chooseView(view, false);
+    if (task && this.state.detail?.task.id !== task) await this.openTask(task, true, false);
+    if (!task && this.state.detail) this.closeDetail(false);
+  }
+  async chooseView(view, route = true) {
     if (this.state.instructionDirty && !confirm('Discard unsaved instruction changes?')) return;
     this.setState({view,instructionDirty:false});
+    if (route) this.setRoute(view, this.state.detail?.task.id);
     if (view === 'Instructions') {
       try {this.setState({instructionNames:await Api.request('/instructions')}); await this.loadInstruction(this.state.instruction);}
       catch (e) {this.toast(e.message);}
@@ -492,8 +525,9 @@ class App extends Component {
   }
   render() {
     const {view,connected,busy,loaded} = this.state;
-    return html`<header class="topbar"><a class="brand" href="/" aria-label="Jot home"><span>j</span>jot<span class="brand-dot">.</span></a><form class="capture" onSubmit=${e => this.capture(e)}><span>＋</span><input id="capture" aria-label="Capture a task" placeholder="What's on your mind? Capture an idea…" autoComplete="off"/><kbd>Ctrl K</kbd><button class="primary" disabled=${busy}>${busy ? 'Saving…' : 'Capture'}</button></form><button class="theme" aria-label="Toggle light and dark theme" onClick=${() => this.theme()}>◐</button></header>
-      ${this.renderDatalists()}<div class="layout"><nav aria-label="Main views"><small>WORKSPACE</small>${['Board','List','Runs','Projects','Instructions','Cleanup'].map((name,i) => html`<button class=${view === name ? 'active' : ''} onClick=${() => this.chooseView(name)}><span>${['▦','☷','▷','◇','≡','↺'][i]}</span>${name}</button>`)}<div class="connection"><span class=${connected ? 'online' : ''}></span>${connected ? 'Live updates' : 'Reconnecting…'}<small>Local space. Clear head.</small></div></nav>
+    return html`<header class="topbar"><a class="brand" href="/" aria-label="Jot home"><span>j</span>jot<span class="brand-dot">.</span></a><form class="capture" onSubmit=${e => this.capture(e)}><span>＋</span><input id="capture" aria-label="Capture a task" placeholder="What's on your mind? Capture an idea…" autoComplete="off"/><kbd>Ctrl K</kbd><button class="primary" disabled=${busy}>${busy ? 'Saving…' : 'Capture'}</button></form>${(() => { const [, label, icon] = App.themes.find(([value]) => value === (this.state.theme || '')) || App.themes[0];
+      return html`<button class="theme" aria-label=${label + ' (click to change)'} title=${label} onClick=${() => this.theme()}>${icon}</button>`; })()}</header>
+      ${this.renderDatalists()}<div class="layout"><nav aria-label="Main views"><small>WORKSPACE</small>${App.views.map((name,i) => html`<a role="button" href=${App.href(name)} class=${'nav-link' + (view === name ? ' active' : '')} aria-current=${view === name ? 'page' : null}><span>${['▦','☷','▷','◇','≡','↺'][i]}</span>${name}</a>`)}<div class="connection"><span class=${connected ? 'online' : ''}></span>${connected ? 'Live updates' : 'Reconnecting…'}<small>Local space. Clear head.</small></div></nav>
       <main><div class="page-heading"><div><p class="eyebrow">MAKE ROOM FOR IDEAS</p><h1>${view}</h1></div><span class="muted">${this.state.tasks.length} tasks in view</span></div>
       ${['Board','List'].includes(view) && this.renderFilters()}
       ${!loaded ? html`<p class="empty">Loading your workspace…</p>` : view === 'Board' ? this.renderBoard() : view === 'List' ? this.renderList() : view === 'Runs' ? this.renderRuns() : view === 'Projects' ? this.renderProjects() : view === 'Instructions' ? this.renderInstructions() : this.renderCleanup()}

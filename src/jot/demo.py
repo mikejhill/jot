@@ -377,7 +377,7 @@ class Screenshots:  # pragma: no cover - needs a browser; run by the CI e2e job
     def _shots(self, page: Page, url: str, theme: str) -> list[Path]:
         """Capture board, list (expanded), and task drawer for one theme."""
         written: list[Path] = []
-        page.goto(url)
+        page.goto(f"{url}/#/board")
         page.get_by_text("Add functional health checks").first.wait_for()
         written.append(self._save(page, f"board-{theme}"))
         if theme == "dark":
