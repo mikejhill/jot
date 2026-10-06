@@ -1,0 +1,89 @@
+[project]
+name = "jot"
+version = "0.1.0"
+description = "Local SQLite task capture and conflict-free agent drawdown"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "claude-agent-sdk>=0.2.163",
+    "fastapi>=0.142.2",
+    "pydantic>=2.12.2",
+    "typer>=0.27.2",
+]
+
+[project.scripts]
+jot = "jot.__main__:Application.main"
+
+[build-system]
+requires = ["uv_build>=0.11.32,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.ruff]
+target-version = "py313"
+line-length = 88
+src = ["src", "tests"]
+extend-exclude = [".uv-cache", ".venv-incomplete", ".tmp", ".smoke-home"]
+
+[tool.ruff.lint]
+select = [
+    "A", "ANN", "ARG", "B", "BLE", "C4", "C90", "D", "DTZ", "E", "ERA", "F",
+    "FA", "FBT", "G", "I", "LOG", "N", "PERF", "PGH", "PIE", "PL", "PT", "PTH",
+    "RET", "RSE", "RUF", "S", "SIM", "T20", "TID", "TRY", "UP", "W",
+]
+ignore = ["D107", "TRY003"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "PLR2004"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.ty.rules]
+all = "error"
+
+[tool.ty.src]
+include = ["src", "tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = ["--strict-markers", "--strict-config", "-ra", "--import-mode=importlib"]
+xfail_strict = true
+
+[tool.coverage.run]
+source = ["jot"]
+branch = true
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true
+skip_covered = true
+exclude_also = ["if __name__ == .__main__.:"]
+
+[tool.poe.tasks]
+format = { cmd = "ruff format .", help = "Format code" }
+format-check = { cmd = "ruff format --check .", help = "Check formatting" }
+lint = { cmd = "ruff check .", help = "Lint code" }
+lint-fix = { cmd = "ruff check . --fix", help = "Lint and auto-fix" }
+typecheck = { cmd = "ty check", help = "Type check strictly" }
+test = { cmd = "pytest --cov", help = "Run tests with coverage" }
+fix = { sequence = ["format", "lint-fix"], help = "Format and fix lint" }
+check = { sequence = ["format-check", "lint", "typecheck", "test"], help = "Run every quality gate" }
+
+[dependency-groups]
+dev = [
+    "poethepoet>=0.48.0",
+    "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.16.10",
+    "ty>=0.0.84",
+]
