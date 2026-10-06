@@ -27,6 +27,7 @@ dependencies = [
     "claude-agent-sdk>=0.2.163",
     "fastapi>=0.142.2",
     "pydantic>=2.13.5",
+    "tomlkit>=0.15.1",
     "typer>=0.27.2",
 ]
 

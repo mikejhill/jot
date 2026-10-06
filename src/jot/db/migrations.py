@@ -8,7 +8,7 @@ from importlib.resources import files
 
 from jot.exceptions import RepositoryError
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 ADD_COLUMN = re.compile(r"ALTER TABLE (\w+) ADD COLUMN (\w+)", re.IGNORECASE)
 TASKS_TABLE = "CREATE TABLE IF NOT EXISTS tasks ("
 
@@ -41,7 +41,24 @@ class Migrations:
     @classmethod
     def upgrades(cls) -> dict[int, str]:
         """Return the script that upgrades the previous version to each version."""
+        schema = cls.schema()
+        start = schema.index("CREATE TABLE IF NOT EXISTS task_events (")
+        end = schema.index("\n);", start) + len("\n);")
+        events = schema[start:end].replace(
+            "IF NOT EXISTS task_events", "task_events_new"
+        )
         return {
+            5: "\n".join(
+                (
+                    "ALTER TABLE runs ADD COLUMN harness TEXT;",
+                    "ALTER TABLE runs ADD COLUMN loadout TEXT;",
+                    events,
+                    "INSERT INTO task_events_new SELECT * FROM task_events;",
+                    "DROP TABLE task_events;",
+                    "ALTER TABLE task_events_new RENAME TO task_events;",
+                    "CREATE INDEX events_task ON task_events(task_id, id);",
+                )
+            ),
             2: "ALTER TABLE runs ADD COLUMN model TEXT;",
             3: cls.rebuild_tasks(),  # adds the needs_input status
             4: "".join(

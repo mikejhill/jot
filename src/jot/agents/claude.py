@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, ClassVar, override
 
 from claude_agent_sdk import (
@@ -9,6 +10,7 @@ from claude_agent_sdk import (
     ClaudeAgentOptions,
     ClaudeSDKError,
     ResultMessage,
+    SystemMessage,
     TextBlock,
     ThinkingBlock,
     ToolUseBlock,
@@ -101,7 +103,7 @@ class ClaudeBackend(AgentBackend):
             AgentError: The query failed or returned no object.
         """
         options = ClaudeAgentOptions(
-            system_prompt=system,
+            system_prompt=system + "\n" + self.instructions,
             tools=[],
             setting_sources=[],
             output_format={"type": "json_schema", "schema": schema},
@@ -112,6 +114,7 @@ class ClaudeBackend(AgentBackend):
             extra_args=dict(LEAN_CLI_ARGS),
         )
         result = await self._result(prompt, options)
+        self.last_usage = TurnUsage.tokens(result.usage or {})
         if result.is_error:
             raise AgentError(f"claude query failed: {result.errors or result.result}")
         if result.structured_output is not None:
@@ -160,12 +163,17 @@ class ClaudeBackend(AgentBackend):
     def _run_options(self, request: RunRequest) -> ClaudeAgentOptions:
         """Build SDK options: read-only tools for plans, full access for execution."""
         system = SystemPromptPreset(
-            type="preset", preset="claude_code", append=request.system
+            type="preset",
+            preset="claude_code",
+            append=request.system + "\n" + self.instructions,
         )
         common = ClaudeAgentOptions(
             cwd=request.cwd,
             system_prompt=system,
-            setting_sources=["project"],
+            setting_sources=["project"] if self.loadout.project_instructions else [],
+            skills=self.loadout.skills,
+            plugins=[{"type": "local", "path": path} for path in self.loadout.plugins],
+            extra_args=self._loadout_args(),
             model=request.model or self.model,
             # Needed for message_delta events, which carry each turn's final usage.
             include_partial_messages=True,
@@ -178,6 +186,53 @@ class ClaudeBackend(AgentBackend):
             # normally inside an isolated git worktree.
             common.permission_mode = "bypassPermissions"
         return common
+
+    def _loadout_args(self) -> dict[str, str | None]:
+        """Isolate MCP and skills unless explicitly included in this loadout."""
+        args: dict[str, str | None] = {"no-session-persistence": None}
+        if not self.loadout.skills:
+            args["disable-slash-commands"] = None
+        if self.loadout.mcp != "all":
+            args["strict-mcp-config"] = None
+            definitions = (
+                self.harness_config.config.mcp_servers if self.harness_config else {}
+            )
+            missing = set(self.loadout.mcp) - set(definitions)
+            if missing:
+                raise AgentError(
+                    f"MCP definitions required for: {', '.join(sorted(missing))}"
+                )
+            args["mcp-config"] = json.dumps(
+                {"mcpServers": {key: definitions[key] for key in self.loadout.mcp}}
+            )
+        return args
+
+    @override
+    async def discover(self) -> dict[str, list[str]]:
+        """Inspect the SDK init message from one short discovery session."""
+        found = await super().discover()
+        options = ClaudeAgentOptions(
+            model=self.model,
+            tools=[],
+            skills="all",
+            setting_sources=["user", "project"],
+            max_turns=1,
+        )
+        async for message in query(prompt="Reply OK.", options=options):
+            if isinstance(message, SystemMessage) and message.subtype == "init":
+                for target, source in (
+                    ("skills", "skills"),
+                    ("mcp", "mcp_servers"),
+                    ("plugins", "plugins"),
+                ):
+                    items = message.data.get(source, [])
+                    if isinstance(items, list):
+                        found[target] = [
+                            item if isinstance(item, str) else str(item.get("name", ""))
+                            for item in items
+                            if isinstance(item, (str, dict))
+                        ]
+        return found
 
     def _assistant_events(self, message: AssistantMessage) -> list[AgentEvent]:
         """Translate text and tool-use blocks into facade events."""

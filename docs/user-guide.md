@@ -4,6 +4,7 @@
 - [Capture](#capture)
 - [Draw down](#draw-down)
 - [The List view](#the-list-view)
+- [Agent settings](#agent-settings)
 - [Reading runs](#reading-runs)
 - [Find and clean up](#find-and-clean-up)
 
@@ -17,6 +18,7 @@ Data lives in `JOT_HOME` (default `~/.jot`, i.e. `%USERPROFILE%\.jot` on Windows
 | `config.toml` | Backends and models, default flow, concurrency, isolation and worktree location, port, cleanup thresholds |
 | `instructions/triage.md` | How notes become tasks: label vocabulary, criticality rubric |
 | `instructions/drawdown.md` | How agents prioritize, refine, ask questions, plan, and execute (including whether to push and open PRs) |
+| `instructions/routing.md` | Guidance for Auto harness/model selection |
 | `instructions/cleanup.md` | What counts as stale or duplicate |
 | `instructions/projects/<slug>.md` | Per-project guidance (repo conventions, test commands) |
 | `runs/<id>.jsonl` | Full agent logs: text, thinking, tool calls, per-turn usage |
@@ -82,6 +84,54 @@ Override any single run with `--model` on `jot plan`, `run`, `approve`, `enrich`
 
 Every row has one-click actions for its status: **Plan** and **Run now** (ready), **Answer** or **Approve** and **Send back** (waiting on you), **Done** and **Send back** (review), **Cancel** (running), and **Mark ready** (inbox). The "Plan with" and "Execute with" pickers above the table choose the backend and model for those buttons. Expand a row (▸) to read the latest plan, answer questions, or approve inline. Presets: Open, Needs attention, Needs input, Ready, In progress, All. Select rows to plan, run, or move several at once.
 
+## Agent settings
+
+Open **Settings** (`#/settings`) to edit harnesses, action defaults, pins, instructions, and loadouts. **Save settings** validates the whole configuration before replacing `config.toml`; existing table comments survive edits. New settings apply to subsequent actions without restarting the server. In-flight runs retain their selected backend and loadout.
+
+![Agent settings with harnesses, action defaults, and pins](images/settings.png)
+
+- **Harnesses:** create several named instances of `claude-sdk`, `codex-cli`, `copilot-cli`, or `fake`. Give each a label, enable it, and choose per-action defaults. `fake` runs offline for tests and demos.
+- **Model policy:** an empty allowed list permits all models except those denied. Disallowed always wins. Set permitted defaults before assigning a restricted harness to an action. Explicit picks outside policy fail with a clear error.
+- **Action defaults:** select a harness for triage, plan, execute, cleanup, assist, and router. Answers resume the plan or execute phase. An explicit harness/model wins over action defaults; `default` selects the provider's default model.
+- **Pins:** global named harness/model shortcuts. Add, reorder, or remove them, and optionally limit each to selected actions. Click a pin to fill a picker. There are no project overrides for harnesses or loadouts.
+- **Pickers:** the capture bar's `⚙ triage` chip opens the same picker used in the drawer and List toolbar. Capture remains one text field plus Enter. The chosen triage harness/model is saved with the capture and used by enrichment. Picks are remembered per action in browser storage when available.
+- **Auto:** choose Auto in the harness select or enter `auto` as the model. A lean LLM router receives a task summary, the action, enabled harness/model candidates, and applicable pins. Edit `instructions/routing.md` in Instructions to guide it. Invalid output or a failed routing call falls back to the action default. The timeline records the choice, reason, and reported router usage; routing logs live in `runs/routing-<task-id>.jsonl`.
+- **Loadouts:** plan, execute, and assist default to lean, with repo project instructions on. Triage, cleanup, and router are always fully lean. Discover runs a short provider session to populate capability checkboxes; Codex currently returns an empty best-effort inventory. Claude supports skills, strict MCP subsets, and local plugin paths. Explicit MCP subsets use definitions under the harness's `config.mcp_servers`. Codex exposes feature disables and repo-document control; Copilot uses its MCP, custom-instruction, and plugin-directory flags. Provider capabilities differ.
+
+```toml
+[harnesses.fast]
+kind = "codex-cli"
+label = "Fast chores"
+models.allowed = ["gpt-6-luna", "default"]
+models.default = { triage = "gpt-6-luna", cleanup = "gpt-6-luna" }
+instructions.plan = "Prefer small, reviewable steps."
+config.disable_features = ["browser_use", "image_generation"]
+
+[actions]
+triage = "fast"
+router = "fast"
+
+[[pins]]
+label = "Quick capture"
+harness = "fast"
+model = "gpt-6-luna"
+actions = ["triage"]
+```
+
+Existing `[triage] backend/model`, `[drawdown] backend`, and `[models.claude|codex|copilot]` remain supported through implicit harnesses named `claude`, `codex`, and `copilot`.
+
+```bash
+jot harness ls
+jot harness show fast
+jot harness discover fast
+jot pins ls
+jot plan 12 --harness fast --model gpt-6-luna
+jot plan 12 --harness auto
+jot enrich 12 --model auto
+```
+
+`--backend` remains an alias for `--harness` on every existing agent command.
+
 ## Reading runs
 
 ![Execute run output with a Markdown table, collapsed tool steps, and token usage](images/task-run-output.png)
@@ -91,6 +141,7 @@ Open a task to see its runs and timeline:
 - **Markdown:** agent messages, results, plans, questions, and comments render as Markdown. Plan runs reply with structured JSON (summary, plan, questions), shown as sections. The renderer builds DOM nodes directly and never injects HTML, so raw HTML in agent output appears as text. Links are limited to `http(s)` and `mailto`.
 - **Collapsed steps:** consecutive tool calls and thinking steps fold into one block ("3 tool calls · 1 thinking"). Click to expand.
 - **Usage:** after every turn, a line shows the model plus input, output, cache-read, and cache-write tokens, and each run shows its total. Claude's per-turn figures come from the API's final `message_delta` usage. Codex reports per turn (input net of cached input). The Copilot CLI reports only the model and premium requests, not tokens.
+- **Harness and loadout:** each new run stores its harness ID and selected capability summary. Older runs may have neither. Auto explanations also appear in run output.
 - **Timeline:** system events read as sentences ("ready → planning (claim)", "Label added: idea").
 
 **Links and theme.** Every view and task has a shareable link: `#/list`, `#/board`, `#/runs`, and `#/board/task/12` (opens that task's panel). The browser back and forward buttons work. List is the default view. The theme button in the top bar cycles through System (follows your OS), Light, and Dark, and remembers your choice:

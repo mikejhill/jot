@@ -77,7 +77,10 @@ class CodexBackend(AgentBackend):
         with tempfile.TemporaryDirectory(prefix="jot-codex-") as scratch:
             root = Path(scratch)
             instructions = root / "instructions.md"
-            instructions.write_text(system or "Answer exactly.", encoding="utf-8")
+            instructions.write_text(
+                (system or "Answer exactly.") + "\n" + self.instructions,
+                encoding="utf-8",
+            )
             schema_file = root / "schema.json"
             schema_file.write_text(json.dumps(schema), encoding="utf-8")
             args = [codex, "exec", "--json", "--ephemeral", "--ignore-user-config"]
@@ -89,6 +92,7 @@ class CodexBackend(AgentBackend):
             ]
             args += ["--cd", str(root), "--output-schema", str(schema_file)]
             args += self._model_args()
+            args += ["--enable", "skip_host_skill_discovery"]
             for feature in DISABLED_FEATURES:
                 args += ["--disable", feature]
             overrides = [*LEAN_OVERRIDES]
@@ -107,10 +111,11 @@ class CodexBackend(AgentBackend):
         args = [codex, "exec", "--json", "--skip-git-repo-check"]
         args += ["--sandbox", SANDBOX_BY_MODE[request.mode], "--cd", str(request.cwd)]
         args += self._model_args(request.model)
+        args += self._loadout_args()
         args.append("-")
         prompt = (
-            f"{request.system}\n\n---\n\n{request.prompt}"
-            if request.system
+            f"{request.system}\n{self.instructions}\n\n---\n\n{request.prompt}"
+            if request.system or self.instructions
             else request.prompt
         )
         spec = ProcessSpec(args=tuple(args), cwd=request.cwd, stdin=prompt)
@@ -139,6 +144,40 @@ class CodexBackend(AgentBackend):
                 final = mapped.text
             yield mapped
         yield AgentEvent(AgentEventKind.RESULT, final, session_id)
+
+    def _loadout_args(self) -> list[str]:
+        """Disable account capabilities by default while preserving repo docs."""
+        args: list[str] = [] if self.loadout.mcp == "all" else ["--ignore-user-config"]
+        features = ["apps", "plugins", "remote_plugin", "skill_search", "memories"]
+        if self.harness_config:
+            features += self.harness_config.config.disable_features
+        for feature in dict.fromkeys(features):
+            args += ["--disable", feature]
+        if not self.loadout.project_instructions:
+            args += ["-c", "project_doc_max_bytes=0"]
+        if self.loadout.skills != "all":
+            args += ["--enable", "skip_host_skill_discovery"]
+            args += [
+                "-c",
+                "skills.config="
+                + "["
+                + ", ".join(
+                    "{path=" + json.dumps(path) + ",enabled=true}"
+                    for path in self.loadout.skills
+                )
+                + "]",
+            ]
+        if self.harness_config and self.loadout.mcp != "all":
+            for name in self.loadout.mcp:
+                definition = self.harness_config.config.mcp_servers.get(name)
+                if definition is None:
+                    raise AgentError(f"MCP definition required for {name}")
+                for key, value in definition.items():
+                    args += [
+                        "-c",
+                        f"mcp_servers.{json.dumps(name)}.{key}={json.dumps(value)}",
+                    ]
+        return args
 
     def _model_args(self, override: str | None = None) -> list[str]:
         """Return ``--model`` arguments when a model is configured."""
@@ -212,6 +251,11 @@ class CodexBackend(AgentBackend):
             item = Json.obj(event.get("item"))
             if kind == "item.completed" and item.get("type") == "agent_message":
                 text = Json.text(item.get("text"))
+            elif kind == "turn.completed":
+                self.last_usage = (
+                    self._usage(Json.obj(event.get("usage")), self.model).usage
+                    or TokenUsage()
+                )
             elif kind in ("turn.failed", "error"):
                 raise AgentError(json.dumps(event.get("error") or event))
         if text is None:

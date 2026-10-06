@@ -9,6 +9,8 @@ from jot.agents.claude import ClaudeBackend
 from jot.agents.codex import CodexBackend
 from jot.agents.copilot import CopilotBackend
 from jot.agents.fake import FakeBackend
+from jot.config import Config
+from jot.harnesses import KINDS
 
 DEFAULT_MODEL = "default"
 # Suggestions shown in the UI model picker; any model id the CLI accepts works.
@@ -39,6 +41,35 @@ class BackendRegistry:
             known = ", ".join(sorted(cls.backends))
             raise AgentError(f"unknown agent backend {name!r}; choose one of {known}")
         return backend(None if model in (None, "", DEFAULT_MODEL) else model)
+
+    @classmethod
+    def configured(
+        cls,
+        config: Config,
+        action: str,
+        harness: str | None = None,
+        model: str | None = None,
+    ) -> AgentBackend:
+        """Create and configure a validated named runtime instance."""
+        name, chosen = config.resolve(action, harness, model)
+        settings = config.effective_harnesses()[name]
+        backend = cls.create(KINDS[settings.kind], chosen)
+        backend.configure(settings, action)
+        return backend
+
+    @classmethod
+    async def discover(cls, config: Config, name: str) -> dict[str, list[str]]:
+        """Discover an enabled instance even when it has no triage model default."""
+        harness = config.effective_harnesses().get(name)
+        if harness is None:
+            raise AgentError(f"Unknown harness {name!r}")
+        model = harness.models.default.get("triage", "default")
+        if not harness.models.permits(model):
+            model = next(
+                (m for m in harness.models.allowed if harness.models.permits(m)),
+                "default",
+            )
+        return await cls.configured(config, "triage", name, model).discover()
 
     @classmethod
     def names(cls) -> list[str]:

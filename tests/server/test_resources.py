@@ -48,6 +48,7 @@ class TestResources:
         """Default and project Markdown files round-trip as plain UTF-8."""
         assert set(client.get("/api/instructions").json()) == {
             "triage.md",
+            "routing.md",
             "drawdown.md",
             "cleanup.md",
         }

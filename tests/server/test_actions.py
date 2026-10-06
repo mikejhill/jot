@@ -209,7 +209,7 @@ class TestActions:
             assert client.post(base + "/enrich").json()["needs_enrichment"] is False
             assert (
                 client.post(base + "/run", json={"backend": "unknown"}).status_code
-                == 422
+                == 400
             )
             events = client.get(base).json()["events"]
             assert any(e["body"].get("note") == "Ship it" for e in events)

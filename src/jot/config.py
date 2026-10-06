@@ -12,9 +12,10 @@ from pydantic import Field, TypeAdapter, ValidationError
 
 from jot.core.models import Flow
 from jot.exceptions import ConfigurationError
+from jot.harnesses import Action, HarnessConfig, Pin
 
 DEFAULT_MODEL = "default"
-ACTIONS = ("triage", "plan", "execute", "cleanup")
+ACTIONS = ("triage", "plan", "execute", "cleanup", "assist", "router")
 
 DEFAULT_CONFIG = """[triage]
 backend = "claude"
@@ -168,6 +169,8 @@ class ActionModels:
     plan: str = DEFAULT_MODEL
     execute: str = DEFAULT_MODEL
     cleanup: str = DEFAULT_MODEL
+    assist: str = DEFAULT_MODEL
+    router: str = DEFAULT_MODEL
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,7 +184,101 @@ class Config:
     cleanup: CleanupConfig = field(default_factory=CleanupConfig)
     models: dict[str, ActionModels] = field(default_factory=dict)
 
+    harnesses: dict[str, HarnessConfig] = field(default_factory=dict)
+    actions: dict[Action, str] = field(default_factory=dict)
+    pins: list[Pin] = field(default_factory=list)
+
+    def effective_harnesses(self) -> dict[str, HarnessConfig]:
+        """Overlay named instances onto backward-compatible provider instances."""
+        kinds = {
+            "claude": "claude-sdk",
+            "codex": "codex-cli",
+            "copilot": "copilot-cli",
+            "fake": "fake",
+        }
+        names = {
+            "claude",
+            "codex",
+            "copilot",
+            self.triage.backend,
+            self.drawdown.backend,
+        }
+        result = {}
+        for name in sorted(names):
+            if name not in kinds:
+                continue
+            defaults = {
+                action: self._legacy_model(name, action) or DEFAULT_MODEL
+                for action in ACTIONS
+            }
+            result[name] = HarnessConfig.model_validate(
+                {
+                    "kind": kinds[name],
+                    "label": name.title(),
+                    "models": {"default": defaults},
+                }
+            )
+        return result | self.harnesses
+
+    def harness_for(self, action: str, override: str | None = None) -> str:
+        """Resolve an action's configured harness, including the router fallback."""
+        if override:
+            return override
+        selected = next(
+            (value for key, value in self.actions.items() if key == action), None
+        )
+        if selected:
+            return selected
+        if action == "router":
+            return self.harness_for("triage")
+        return (
+            self.triage.backend
+            if action in {"triage", "cleanup"}
+            else self.drawdown.backend
+        )
+
+    def resolve(
+        self, action: str, harness: str | None = None, model: str | None = None
+    ) -> tuple[str, str | None]:
+        """Resolve explicit choices before action defaults and enforce policy."""
+        name = self.harness_for(action, harness)
+        configured = self.effective_harnesses().get(name)
+        if configured is None:
+            raise ConfigurationError(f"Unknown harness {name!r}")
+        chosen = (model or "").strip() or next(
+            (
+                value
+                for key, value in configured.models.default.items()
+                if key == action
+            ),
+            DEFAULT_MODEL,
+        )
+        try:
+            configured.validate_model(chosen)
+        except ConfigurationError as err:
+            raise ConfigurationError(f"Harness {name!r}: {err}") from err
+        return name, None if chosen == DEFAULT_MODEL else chosen
+
+    def validate_settings(self) -> None:
+        """Check cross references and defaults before accepting configuration."""
+        for action in ACTIONS:
+            self.resolve(action)
+        for name, harness in self.effective_harnesses().items():
+            for model in harness.models.default.values():
+                if not harness.models.permits(model):
+                    raise ConfigurationError(
+                        f"Harness {name!r}: default model {model!r} violates policy"
+                    )
+        for pin in self.pins:
+            self.resolve("plan", pin.harness, pin.model)
+
     def model_for(
+        self, backend: str, action: str, override: str | None = None
+    ) -> str | None:
+        """Resolve a model for a named harness with policy validation."""
+        return self.resolve(action, backend, override)[1]
+
+    def _legacy_model(
         self, backend: str, action: str, override: str | None = None
     ) -> str | None:
         """Resolve a model: explicit override, then config, then provider default.
@@ -196,10 +293,17 @@ class Config:
                 "plan": models.plan,
                 "execute": models.execute,
                 "cleanup": models.cleanup,
+                "assist": models.assist,
+                "router": models.router,
             }
             chosen = by_action.get(action, DEFAULT_MODEL)
-            if action == "triage" and chosen == DEFAULT_MODEL:
-                chosen = self.triage.model  # legacy [triage] model setting
+            if (
+                action == "triage"
+                and chosen == DEFAULT_MODEL
+                and backend == self.triage.backend
+            ):
+                # Legacy [triage] model applies only to the legacy triage backend.
+                chosen = self.triage.model
         return None if chosen in ("", DEFAULT_MODEL) else chosen
 
 
@@ -232,15 +336,24 @@ class JotHome:
                 "instructions/triage.md": TRIAGE,
                 "instructions/drawdown.md": DRAWDOWN,
                 "instructions/cleanup.md": CLEANUP,
+                "instructions/routing.md": (
+                    "# Routing\nChoose an enabled harness and permitted model. "
+                    "Prefer inexpensive models for routine chores and stronger "
+                    "models for critical planning or complex execution. "
+                    "Explain the choice briefly.\n"
+                ),
             }
             for relative, content in defaults.items():
                 self._write_missing(self.path / relative, content)
             with (self.path / "config.toml").open("rb") as stream:
-                return TypeAdapter(Config).validate_python(tomllib.load(stream))
+                config = TypeAdapter(Config).validate_python(tomllib.load(stream))
+            config.validate_settings()
         except (OSError, tomllib.TOMLDecodeError, ValidationError) as err:
             raise ConfigurationError(
                 f"Cannot load Jot home {self.path}: {err}"
             ) from err
+        else:
+            return config
 
     @staticmethod
     def _write_missing(path: Path, content: str) -> None:

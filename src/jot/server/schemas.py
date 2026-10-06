@@ -9,7 +9,7 @@ from pydantic import Field
 
 from jot.core.models import Criticality, Flow, Record, Status, TaskType
 
-type Backend = Literal["claude", "codex", "copilot"]
+type Backend = str
 
 
 class TaskFields(Record):
@@ -31,6 +31,9 @@ class Capture(TaskFields):
     """Raw quick capture with optional prefilled content."""
 
     text: str = Field(min_length=1)
+    backend: Backend | None = None
+    harness: str | None = None
+    model: str | None = None
 
 
 class TaskFilters(Record):
@@ -68,6 +71,7 @@ class RunRequest(Record):
 
     flow: Flow | None = None
     backend: Backend | None = None
+    harness: str | None = None
     model: str | None = Field(default=None, max_length=200)
 
 
@@ -76,6 +80,7 @@ class Approval(Record):
 
     note: str | None = None
     backend: Backend | None = None
+    harness: str | None = None
     model: str | None = Field(default=None, max_length=200)
 
 
@@ -91,6 +96,7 @@ class Answers(Record):
 
     answers: list[Answer] = Field(default_factory=list)
     backend: Backend | None = None
+    harness: str | None = None
     model: str | None = Field(default=None, max_length=200)
 
 
@@ -98,6 +104,7 @@ class Enrichment(Record):
     """Optional enrichment backend override."""
 
     backend: Backend | None = None
+    harness: str | None = None
     model: str | None = Field(default=None, max_length=200)
 
 
@@ -112,6 +119,7 @@ class Scan(Record):
 
     use_agent: bool = False
     backend: Backend | None = None
+    harness: str | None = None
     model: str | None = Field(default=None, max_length=200)
 
 

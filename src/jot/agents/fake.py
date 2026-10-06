@@ -30,6 +30,7 @@ class FakeBackend(AgentBackend):
         self, system: str, prompt: str, schema: JsonObject
     ) -> JsonObject:
         """Return the class-level canned object (tests set ``FakeBackend.canned``)."""
+        self.last_usage = TokenUsage(input=10, output=5)
         result: JsonObject = {**self.canned}
         return result
 

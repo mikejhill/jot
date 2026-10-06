@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, ClassVar
 from pydantic import TypeAdapter, ValidationError
 
 from jot.exceptions import AppError
+from jot.harnesses import HarnessConfig, Loadout
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -130,6 +131,22 @@ class AgentBackend(ABC):
 
     def __init__(self, model: str | None = None) -> None:
         self.model = model
+        self.last_usage = TokenUsage()
+        self.loadout = Loadout()
+        self.harness_config: HarnessConfig | None = None
+        self.instructions = ""
+
+    def configure(self, harness: HarnessConfig, action: str) -> None:
+        """Attach one resolved action's explicit capability policy."""
+        self.harness_config = harness
+        self.loadout = harness.for_action(action)
+        self.instructions = next(
+            (value for key, value in harness.instructions.items() if key == action), ""
+        )
+
+    async def discover(self) -> dict[str, list[str]]:
+        """Return best-effort capabilities; unsupported providers return empty."""
+        return {"skills": [], "mcp": [], "plugins": []}
 
     @abstractmethod
     async def structured(

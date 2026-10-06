@@ -16,6 +16,7 @@ from jot.core.models import Project
 from jot.exceptions import NotFoundError, RepositoryError
 from jot.server.runtime import EventStream, RuntimeAccess
 from jot.server.schemas import Markdown
+from jot.services.settings import SettingsStore
 
 
 class ResourceRoutes:
@@ -46,6 +47,11 @@ class ResourceRoutes:
             "/instructions/{name:path}", self.save_instruction, methods=["PUT"]
         )
         self.router.add_api_route("/config", self.config, methods=["GET"])
+        self.router.add_api_route("/settings", self.settings, methods=["GET"])
+        self.router.add_api_route("/settings", self.save_settings, methods=["PUT"])
+        self.router.add_api_route(
+            "/settings/harnesses/{harness_id}/discover", self.discover, methods=["POST"]
+        )
         self.router.add_api_route("/stream", self.stream, methods=["GET"])
 
     async def projects(self) -> list[Project]:
@@ -133,6 +139,22 @@ class ResourceRoutes:
             "model_defaults": defaults,
             "model_suggestions": MODEL_SUGGESTIONS,
         }
+
+    async def settings(self) -> dict[str, object]:
+        """Return effective named harnesses and global action policy."""
+        return SettingsStore.effective(self._access.runtime.config)
+
+    async def save_settings(self, body: dict[str, object]) -> dict[str, object]:
+        """Validate and persist edits, then update every shared service snapshot."""
+        runtime = self._access.runtime
+        config = SettingsStore(runtime.home).save(body)
+        runtime.config = config
+        runtime.runner.config = runtime.enrich.config = runtime.cleanup.config = config
+        return SettingsStore.effective(config)
+
+    async def discover(self, harness_id: str) -> dict[str, list[str]]:
+        """Inspect one enabled harness using a cheap session."""
+        return await BackendRegistry.discover(self._access.runtime.config, harness_id)
 
     async def stream(self) -> StreamingResponse:
         """Open a live event stream with proxy buffering disabled."""

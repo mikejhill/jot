@@ -112,9 +112,7 @@ class App extends Component {
     };
     document.addEventListener('keydown', this.keydown);
     this.refresh().catch(e => this.toast(e.message));
-    Api.request('/config').then(config => this.setState(s => ({config, backend:config.drawdown.backend,
-      picks:{plan:{model:'', ...s.picks.plan, backend:s.picks.plan?.backend || config.drawdown.backend},
-             execute:{model:'', ...s.picks.execute, backend:s.picks.execute?.backend || config.drawdown.backend}}}))).catch(e => this.toast(e.message));
+    Api.request('/settings').then(settings => this.setState({settings, config:settings, backend:settings.actions.plan})).catch(e => this.toast(e.message));
     this.stream = new EventSource('/api/stream');
     this.stream.onopen = () => { this.setState({connected:true}); this.scheduleRefresh(); };
     this.stream.onerror = () => this.setState({connected:false});
@@ -200,7 +198,7 @@ class App extends Component {
     if (!text || this.state.busy) return;
     this.setState({busy:true});
     try {
-      const task = await Api.request('/tasks','POST',{text}); input.value = '';
+      const task = await Api.request('/tasks','POST',{text, ...this.pick('triage')}); input.value = '';
       this.setState(s => ({tasks:[task,...s.tasks.filter(t => t.id !== task.id)]}));
       this.toast(`Captured #${task.id} · inbox · enriching…`);
     } catch (error) {this.toast(error.message);}
@@ -211,7 +209,7 @@ class App extends Component {
   static loadPicks() {
     try { return JSON.parse(localStorage.getItem('jot-picks')) || {plan:{}, execute:{}}; } catch { return {plan:{}, execute:{}}; }
   }
-  pick(kind) {const p = this.state.picks[kind] || {}; return {backend:p.backend || this.state.backend, model:(p.model || '').trim() || null};}
+  pick(kind) {const p = this.state.picks[kind] || {}; return {backend:p.backend || this.state.settings?.actions?.[kind] || this.state.backend, model:(p.model || '').trim() || null};}
   setPick(kind, change) {
     this.setState(s => {
       const picks = {...s.picks, [kind]:{...s.picks[kind], ...change}};
@@ -245,14 +243,74 @@ class App extends Component {
     try { const detail = await Api.request(`/tasks/${id}`); this.setState(s => ({expanded:{...s.expanded, [id]:detail}})); }
     catch (error) { this.toast(error.message); }
   }
+  static actions = ['triage','plan','execute','cleanup','assist','router'];
+  harnesses() { return this.state.settings?.harnesses || Object.fromEntries(backends.map(id => [id, {label:id, enabled:true, models:{}}])); }
+  modelsFor(id) {
+    const policy = this.harnesses()[id]?.models || {};
+    const suggestions = this.state.settings?.model_suggestions?.[id] || this.state.config?.model_suggestions?.[id] || [];
+    return [...new Set(policy.allowed?.length ? policy.allowed : suggestions)].filter(m => m !== 'auto' && !policy.disallowed?.includes(m));
+  }
   renderPicker(kind, label) {
     const backend = this.pick(kind).backend, model = this.state.picks[kind]?.model || '';
-    const fallback = this.state.config?.model_defaults?.[backend]?.[kind];
-    return html`<span class="picker"><small>${label}</small><select aria-label=${label + ' backend'} value=${backend} onChange=${e => this.setPick(kind, {backend:e.target.value, model:''})}>${options(backends)}</select><input class="model-input" aria-label=${label + ' model'} list=${'models-' + backend} value=${model} placeholder=${fallback ? 'default (' + fallback + ')' : 'provider default'} onInput=${e => this.setPick(kind, {model:e.target.value})}/></span>`;
+    const fallback = this.harnesses()[backend]?.models?.default?.[kind] || this.state.config?.model_defaults?.[backend]?.[kind];
+    const pins = (this.state.settings?.pins || []).filter(p => (!p.actions || p.actions.includes(kind)) && this.harnesses()[p.harness]?.enabled !== false);
+    return html`<span class="picker"><small>${label}</small><select aria-label=${label + ' backend'} value=${backend} onChange=${e => this.setPick(kind, {backend:e.target.value, model:''})}><option value="auto">Auto</option>${Object.entries(this.harnesses()).filter(([,h]) => h.enabled).map(([id,h]) => html`<option value=${id}>${h.label || id}</option>`)}</select><input class="model-input" role="combobox" aria-expanded="false" aria-label=${label + ' model'} list=${'models-' + backend} value=${model} disabled=${backend === 'auto'} placeholder=${fallback && fallback !== 'default' ? 'default (' + fallback + ')' : 'provider default'} onInput=${e => this.setPick(kind, {model:e.target.value})}/>${pins.map(p => html`<button type="button" class="pin-chip" title=${p.harness + ' / ' + p.model} onClick=${() => this.setPick(kind, {backend:p.harness, model:p.model})}>${p.label}</button>`)}</span>`;
+  }
+  captureLabel() {
+    const pick = this.pick('triage');
+    return `${pick.backend} / ${pick.model || this.harnesses()[pick.backend]?.models?.default?.triage || 'default'}`;
   }
   renderDatalists() {
-    const suggestions = this.state.config?.model_suggestions || {};
-    return backends.map(b => html`<datalist id=${'models-' + b}>${(suggestions[b] || []).map(m => html`<option value=${m}/>`)}</datalist>`);
+    return Object.keys(this.harnesses()).map(b => html`<datalist id=${'models-' + b}><option value="auto">Auto</option>${this.modelsFor(b).map(m => html`<option value=${m}/>` )}</datalist>`);
+  }
+  editSettings(change) {
+    const draft = structuredClone(this.state.settingsDraft || this.state.settings);
+    change(draft); this.setState({settingsDraft:draft});
+  }
+  async saveSettings() {
+    const {harnesses, actions, pins} = this.state.settingsDraft || this.state.settings;
+    try {
+      const settings = await Api.request('/settings', 'PUT', {harnesses, actions, pins});
+      this.setState({settings, config:settings, settingsDraft:null}); this.toast('Settings saved');
+    } catch (e) { this.toast(e.message); }
+  }
+  async discoverHarness(id) {
+    this.setState({discovering:id});
+    try {
+      const found = await Api.request(`/settings/harnesses/${encodeURIComponent(id)}/discover`, 'POST');
+      this.setState(s => ({discovered:{...s.discovered, [id]:found}}));
+    } catch (e) { this.toast(e.message); }
+    finally { this.setState({discovering:null}); }
+  }
+  renderLoadout(id, h, action) {
+    const lean = ['triage','cleanup','router'].includes(action);
+    const loadout = lean ? {skills:[],mcp:[],plugins:[],project_instructions:false} : (h.loadout?.[action] || {skills:[],mcp:[],plugins:[],project_instructions:true});
+    const found = this.state.discovered?.[id] || {};
+    const change = (key, value) => this.editSettings(s => {
+      const target = s.harnesses[id]; target.loadout ||= {};
+      target.loadout[action] = {...loadout, [key]:value};
+    });
+    return html`<fieldset disabled=${lean}><legend>Loadout ${lean ? '(always lean)' : ''}</legend>
+      <label><input type="checkbox" checked=${loadout.project_instructions} onChange=${e => change('project_instructions',e.target.checked)}/>Repo project instructions</label>
+      ${['skills','mcp','plugins'].map(key => html`<div class="loadout-group"><b>${key === 'mcp' ? 'MCP servers' : human(key)}</b>
+        ${key !== 'plugins' && html`<label><input type="checkbox" checked=${loadout[key] === 'all'} onChange=${e => change(key,e.target.checked ? 'all' : [])}/>All</label>`}
+        ${[...new Set([...(found[key] || []), ...(Array.isArray(loadout[key]) ? loadout[key] : [])])].map(name => html`<label><input type="checkbox" checked=${loadout[key] === 'all' || loadout[key]?.includes(name)} disabled=${lean || loadout[key] === 'all'} onChange=${e => change(key,e.target.checked ? [...(loadout[key] || []),name] : loadout[key].filter(n => n !== name))}/>${name}</label>`)}
+        ${!found[key]?.length && html`<small class="muted">Discover to list available ${key}.</small>`}</div>`)}</fieldset>`;
+  }
+  renderSettings() {
+    const settings = this.state.settingsDraft || this.state.settings;
+    if (!settings) return html`<p>Loading settings…</p>`;
+    const entries = Object.entries(settings.harnesses);
+    const setHarness = (id, change) => this.editSettings(s => change(s.harnesses[id]));
+    return html`<div class="settings"><div class="toolbar"><p>Global harnesses, model policy, and lean action loadouts.</p><button class="primary" onClick=${() => this.saveSettings()}>Save settings</button></div>
+      <section class="panel settings-section"><h2>Actions</h2><div class="settings-grid">${App.actions.map(action => html`<label>${human(action)} default harness<select aria-label=${action + ' default harness'} value=${settings.actions[action]} onChange=${e => this.editSettings(s => {s.actions[action] = e.target.value;})}>${entries.filter(([,h]) => h.enabled).map(([id,h]) => html`<option value=${id}>${h.label || id}</option>`)}</select></label>`)}</div><p>Auto uses the router and editable <a href="#/instructions">instructions/routing.md</a>.</p></section>
+      <section><div class="toolbar"><h2>Harnesses</h2><button onClick=${() => {const id = prompt('New harness id'); if (id && !settings.harnesses[id]) this.editSettings(s => {s.harnesses[id] = {kind:'claude-sdk',label:id,enabled:true,models:{allowed:[],disallowed:[],default:{}},instructions:{},loadout:{},config:{}};});}}>Add harness</button></div>
+      ${entries.map(([id,h]) => html`<section class="panel harness-card"><div class="toolbar"><h3>${h.label || id}</h3><code>${id}</code><label><input type="checkbox" aria-label=${id + ' enabled'} checked=${h.enabled} onChange=${e => setHarness(id,x => {x.enabled = e.target.checked;})}/>Enabled</label><button disabled=${!!this.state.discovering} onClick=${() => this.discoverHarness(id)}>${this.state.discovering === id ? 'Discovering…' : 'Discover'}</button></div>
+        <div class="settings-grid"><label>Label<input aria-label=${id + ' label'} value=${h.label} onInput=${e => setHarness(id,x => {x.label=e.target.value;})}/></label><label>Kind<select aria-label=${id + ' kind'} value=${h.kind} onChange=${e => setHarness(id,x => {x.kind=e.target.value;})}>${options(['claude-sdk','codex-cli','copilot-cli','fake'])}</select></label>
+        ${['allowed','disallowed'].map(key => html`<label>${human(key)} models<input aria-label=${id + ' ' + key + ' models'} value=${(h.models[key] || []).join(', ')} placeholder="Comma separated model IDs" onChange=${e => setHarness(id,x => {x.models[key]=split(e.target.value);})}/><span class="chips">${(h.models[key] || []).map(m => html`<span class="pill">${m}</span>`)}</span></label>`)}</div>
+        ${App.actions.map(action => html`<details><summary>${human(action)}</summary><div class="settings-grid"><label>Default model<input aria-label=${id + ' ' + action + ' default model'} value=${h.models.default[action] || 'default'} list=${'models-' + id} onInput=${e => setHarness(id,x => {x.models.default[action]=e.target.value;})}/></label><label>Appended instructions<textarea aria-label=${id + ' ' + action + ' instructions'} value=${h.instructions[action] || ''} onInput=${e => setHarness(id,x => {x.instructions[action]=e.target.value;})}/></label></div>${this.renderLoadout(id,h,action)}</details>`)}</section>`)}</section>
+      <section class="panel settings-section"><div class="toolbar"><h2>Pins</h2><button onClick=${() => this.editSettings(s => {s.pins.push({label:'New pin',harness:s.actions.plan,model:'default'});})}>Add pin</button></div>
+      ${settings.pins.map((pin,index) => html`<div class="pin-editor"><div class="settings-grid"><label>Label<input aria-label=${'Pin ' + (index+1) + ' label'} value=${pin.label} onInput=${e => this.editSettings(s => {s.pins[index].label=e.target.value;})}/></label><label>Harness<select value=${pin.harness} onChange=${e => this.editSettings(s => {s.pins[index].harness=e.target.value;})}>${entries.map(([id]) => html`<option value=${id}>${id}</option>`)}</select></label><label>Model<input value=${pin.model} list=${'models-' + pin.harness} onInput=${e => this.editSettings(s => {s.pins[index].model=e.target.value;})}/></label></div><div class="toolbar"><label><input type="checkbox" checked=${!pin.actions} onChange=${e => this.editSettings(s => {if (e.target.checked) delete s.pins[index].actions; else s.pins[index].actions=[];})}/>All actions</label>${App.actions.map(action => html`<label><input type="checkbox" disabled=${!pin.actions} checked=${!pin.actions || pin.actions.includes(action)} onChange=${e => this.editSettings(s => {s.pins[index].actions=e.target.checked ? [...pin.actions,action] : pin.actions.filter(a => a !== action);})}/>${action}</label>`)}<button disabled=${index === 0} onClick=${() => this.editSettings(s => {[s.pins[index-1],s.pins[index]]=[s.pins[index],s.pins[index-1]];})}>Move up</button><button disabled=${index === settings.pins.length-1} onClick=${() => this.editSettings(s => {[s.pins[index+1],s.pins[index]]=[s.pins[index],s.pins[index+1]];})}>Move down</button><button onClick=${() => this.editSettings(s => {s.pins.splice(index,1);})}>Remove pin</button></div></div>`)}</section></div>`;
   }
   rowActions(t) {
     const active = this.state.runs.find(r => r.task_id === t.id && !r.ended_at);
@@ -293,6 +351,7 @@ class App extends Component {
     // One readable line for system events; null when the event has prose to show.
     const b = event.body;
     switch (event.kind) {
+      case 'routing': return `Auto ${b.action}: ${b.harness} / ${b.model} — ${b.reason}`;
       case 'created': return `Captured from ${b.source || 'unknown'}`;
       case 'status': return b.action === 'soft_delete' ? 'Deleted' : `${human(b.from)} → ${human(b.to)}${b.action ? ` (${human(b.action)})` : ''}`;
       case 'run_log': return `Run #${b.run_id}${b.status ? ` ${human(b.status)}` : ''}${b.action ? ` · ${human(b.action)}` : ''}`;
@@ -336,7 +395,7 @@ class App extends Component {
     try { localStorage.setItem('jot-theme', next); } catch { /* storage unavailable */ }
     this.setState({theme:next});
   }
-  static views = ['Board','List','Runs','Projects','Instructions','Cleanup'];
+  static views = ['Board','List','Runs','Projects','Instructions','Cleanup','Settings'];
   static route(hash = (typeof location === 'undefined' ? '' : location.hash)) {
     // '#/<view>[/task/<id>]' → {view, task}; unknown or empty → List.
     const [, view = '', kind = '', id = ''] = hash.replace(/^#/, '').split('/');
@@ -412,8 +471,14 @@ class App extends Component {
       <tbody>${tasks.map(t => html`<tr><td><input type="checkbox" aria-label=${'Select task ' + t.id} checked=${selected.includes(t.id)} onChange=${() => this.toggleSelect(t.id)}/></td><td><button class="caret" aria-label=${(expanded[t.id] ? 'Collapse' : 'Expand') + ' task ' + t.id} onClick=${() => this.toggleExpand(t.id)}>${expanded[t.id] ? '▾' : '▸'}</button><button class="text-button" onClick=${() => this.openTask(t.id)}>${t.title}</button><div class="chips">${t.labels.map(l => pill(l))}${t.needs_enrichment && t.status === 'inbox' && html`<small>enriching…</small>`}</div></td><td>${this.state.projects.find(p => p.id === t.project_id)?.name || '—'}</td><td>${pill(t.status)}</td><td>${pill(t.criticality)}</td><td><div class="row-actions">${this.rowActions(t)}</div></td><td>${date(t.updated_at)}</td></tr>${expanded[t.id] && this.renderExpanded(t, expanded[t.id])}`)}</tbody></table></div>
       ${!tasks.length && html`<p class="empty">No tasks match these filters.</p>`}</div>`;
   }
+  static loadoutSummary(raw) {
+    try {
+      const l = JSON.parse(raw), names = key => l[key] === 'all' ? 'all' : (l[key] || []).join(', ') || 'none';
+      return `skills: ${names('skills')}; MCP: ${names('mcp')}; plugins: ${names('plugins')}; repo instructions: ${l.project_instructions ? 'on' : 'off'}`;
+    } catch { return raw; }
+  }
   renderRuns(runs = this.state.runs, inDrawer = false) {
-    return html`<div class="runs">${runs.length ? [...runs].reverse().map(r => html`<article class="panel run"><div class="toolbar"><button class="text-button" onClick=${() => this.openTask(r.task_id)}>Run #${r.id} · task #${r.task_id}</button>${pill(r.status)}${pill(r.backend)}${r.model && html`<span class="pill">${r.model}</span>`}${pill(r.phase)}</div><small>${date(r.started_at)}</small>${r.summary ? markdown(r.summary) : html`<p class="muted">Waiting for output…</p>`}${r.branch && html`<small>Branch: ${r.branch}</small>`}
+    return html`<div class="runs">${runs.length ? [...runs].reverse().map(r => html`<article class="panel run"><div class="toolbar"><button class="text-button" onClick=${() => this.openTask(r.task_id)}>Run #${r.id} · task #${r.task_id}</button>${pill(r.status)}${pill(r.harness || r.backend)}${r.model && html`<span class="pill">${r.model}</span>`}${pill(r.phase)}</div><small>${date(r.started_at)}</small>${r.summary ? markdown(r.summary) : html`<p class="muted">Waiting for output…</p>`}${(this.state.runLogs[r.id] || []).filter(e => e.kind === 'routing').map(e => html`<p class="event-summary">${e.text}</p>`)}${r.loadout && html`<p class="muted run-loadout">Loadout: ${App.loadoutSummary(r.loadout)}</p>`}${r.branch && html`<small>Branch: ${r.branch}</small>`}
       ${!r.ended_at && html`<button onClick=${() => this.act(() => Api.request(`/runs/${r.id}/cancel`,'POST'))}>Cancel run</button>`}
       ${this.renderRunTotals(r)}
       ${inDrawer || this.state.openLogs[r.id] ? this.renderLog(this.state.runLogs[r.id]) : html`<button class="text-button" onClick=${() => this.toggleLog(r.id)}>Show output</button>`}
@@ -496,7 +561,8 @@ class App extends Component {
   renderCleanup() {
     const p = this.state.proposal;
     return html`<div class="panel"><h2>Review before anything changes</h2><p>Scan for stale or duplicate work. Approve only the items you want applied.</p>
-      <button class="primary" onClick=${() => this.act(async () => {const scan = await Api.request('/cleanup/scan','POST',{}); this.setState({proposal:await Api.request('/cleanup/' + scan.id),approved:[]});})}>Scan tasks</button>
+      <div class="toolbar"><label><input type="checkbox" checked=${!!this.state.cleanupAgent} onChange=${e => this.setState({cleanupAgent:e.target.checked})}/>Include agent review</label>${this.renderPicker('cleanup','Cleanup with')}</div>
+      <button class="primary" onClick=${() => this.act(async () => {const scan = await Api.request('/cleanup/scan','POST',{use_agent:!!this.state.cleanupAgent,...this.pick('cleanup')}); this.setState({proposal:await Api.request('/cleanup/' + scan.id),approved:[]});})}>Scan tasks</button>
       ${p && html`<div><h3>Proposal #${p.id} · ${p.status}</h3>${p.items.map(item => html`<label class="cleanup-item"><input type="checkbox" checked=${this.state.approved.includes(item.index)} onChange=${e => this.setState(s => ({approved:e.target.checked ? [...s.approved,item.index] : s.approved.filter(i => i !== item.index)}))}/><span><strong>${item.title}</strong> · ${human(item.action)}<small>${item.reason}</small></span></label>`)}
       <button disabled=${!this.state.approved.length} onClick=${() => this.act(async () => {await Api.request(`/cleanup/${p.id}/apply`,'POST',{approved_indexes:this.state.approved}); this.setState({proposal:await Api.request('/cleanup/' + p.id),approved:[]});})}>Apply ${this.state.approved.length} approved</button></div>`}</div>`;
   }
@@ -517,7 +583,7 @@ class App extends Component {
       <section class="actions"><h2>Draw down</h2><div class="toolbar">${this.renderPicker('plan','Plan with')}${this.renderPicker('execute','Execute with')}</div><div class="toolbar"><button onClick=${() => this.run(t.id,'planned')}>Plan first</button><button onClick=${() => this.run(t.id,'direct')}>Run now (direct)</button></div>
       <form onSubmit=${e => {e.preventDefault(); const {note} = formValues(e); this.approve(t.id, note);}}><label>Approval note<input name="note" placeholder="Optional approval note"/></label><button class="primary">Approve</button></form>
       <form onSubmit=${e => {e.preventDefault(); const body = formValues(e); this.act(() => Api.request(`/tasks/${t.id}/send-back`,'POST',body));}}><label>Send-back feedback<input name="comment" required placeholder="What needs to change?"/></label><button>Send back</button></form>
-      <div class="toolbar"><button onClick=${() => this.act(() => Api.request(`/tasks/${t.id}/enrich`,'POST',{}))}>Re-enrich</button><select aria-label="Move task status" value="" onChange=${e => this.move(t.id,e.target.value)}><option value="">Move status…</option>${options(d.transitions)}</select><button class="danger" onClick=${async () => {if (confirm('Delete this task? Its history will be retained.')) {this.closeDetail(); await this.act(() => Api.request(`/tasks/${t.id}`,'DELETE'));}}}>Delete</button></div></section>
+      <div class="toolbar"><button onClick=${() => this.act(() => Api.request(`/tasks/${t.id}/enrich`,'POST',this.pick('triage')))}>Re-enrich</button><select aria-label="Move task status" value="" onChange=${e => this.move(t.id,e.target.value)}><option value="">Move status…</option>${options(d.transitions)}</select><button class="danger" onClick=${async () => {if (confirm('Delete this task? Its history will be retained.')) {this.closeDetail(); await this.act(() => Api.request(`/tasks/${t.id}`,'DELETE'));}}}>Delete</button></div></section>
       <h2>Runs & live output</h2>${this.renderRuns(d.runs, true)}<h2>Timeline</h2>
       <form onSubmit=${async e => {e.preventDefault(); const form=e.currentTarget, body=formValues(e); if (await this.act(() => Api.request(`/tasks/${t.id}/comment`,'POST',body))) form.reset();}}><label>Add a comment<textarea name="comment" required rows="2" placeholder="Answer a question or add context…"/></label><button>Post comment</button></form>
       <ol class="timeline">${[...d.events].reverse().map(event => html`<li><div class="toolbar">${pill(event.kind)}<small>${event.actor} · ${date(event.ts)}</small></div>${this.renderEventBody(event)}</li>`)}</ol>
@@ -525,12 +591,12 @@ class App extends Component {
   }
   render() {
     const {view,connected,busy,loaded} = this.state;
-    return html`<header class="topbar"><a class="brand" href="/" aria-label="Jot home"><span>j</span>jot<span class="brand-dot">.</span></a><form class="capture" onSubmit=${e => this.capture(e)}><span>＋</span><input id="capture" aria-label="Capture a task" placeholder="What's on your mind? Capture an idea…" autoComplete="off"/><kbd>Ctrl K</kbd><button class="primary" disabled=${busy}>${busy ? 'Saving…' : 'Capture'}</button></form>${(() => { const [, label, icon] = App.themes.find(([value]) => value === (this.state.theme || '')) || App.themes[0];
+    return html`<header class="topbar"><a class="brand" href="/" aria-label="Jot home"><span>j</span>jot<span class="brand-dot">.</span></a><form class="capture" onSubmit=${e => this.capture(e)}><span>＋</span><input id="capture" aria-label="Capture a task" placeholder="What's on your mind? Capture an idea…" autoComplete="off"/><button type="button" class="capture-chip" title="Harness and model used to triage this capture" aria-label=${'Triage with ' + this.captureLabel() + ' (change)'} aria-expanded=${!!this.state.capturePicker} onClick=${() => this.setState({capturePicker:!this.state.capturePicker})}>⚙ ${this.captureLabel()}</button><kbd>Ctrl K</kbd><button class="primary" disabled=${busy}>${busy ? 'Saving…' : 'Capture'}</button>${this.state.capturePicker && html`<div class="capture-popover">${this.renderPicker('triage','Triage with')}</div>`}</form>${(() => { const [, label, icon] = App.themes.find(([value]) => value === (this.state.theme || '')) || App.themes[0];
       return html`<button class="theme" aria-label=${label + ' (click to change)'} title=${label} onClick=${() => this.theme()}>${icon}</button>`; })()}</header>
-      ${this.renderDatalists()}<div class="layout"><nav aria-label="Main views"><small>WORKSPACE</small>${App.views.map((name,i) => html`<a role="button" href=${App.href(name)} class=${'nav-link' + (view === name ? ' active' : '')} aria-current=${view === name ? 'page' : null}><span>${['▦','☷','▷','◇','≡','↺'][i]}</span>${name}</a>`)}<div class="connection"><span class=${connected ? 'online' : ''}></span>${connected ? 'Live updates' : 'Reconnecting…'}<small>Local space. Clear head.</small></div></nav>
+      ${this.renderDatalists()}<div class="layout"><nav aria-label="Main views"><small>WORKSPACE</small>${App.views.map((name,i) => html`<a role="button" href=${App.href(name)} class=${'nav-link' + (view === name ? ' active' : '')} aria-current=${view === name ? 'page' : null}><span>${['▦','☷','▷','◇','≡','↺','⚙'][i]}</span>${name}</a>`)}<div class="connection"><span class=${connected ? 'online' : ''}></span>${connected ? 'Live updates' : 'Reconnecting…'}<small>Local space. Clear head.</small></div></nav>
       <main><div class="page-heading"><div><p class="eyebrow">MAKE ROOM FOR IDEAS</p><h1>${view}</h1></div><span class="muted">${this.state.tasks.length} tasks in view</span></div>
       ${['Board','List'].includes(view) && this.renderFilters()}
-      ${!loaded ? html`<p class="empty">Loading your workspace…</p>` : view === 'Board' ? this.renderBoard() : view === 'List' ? this.renderList() : view === 'Runs' ? this.renderRuns() : view === 'Projects' ? this.renderProjects() : view === 'Instructions' ? this.renderInstructions() : this.renderCleanup()}
+      ${!loaded ? html`<p class="empty">Loading your workspace…</p>` : view === 'Board' ? this.renderBoard() : view === 'List' ? this.renderList() : view === 'Runs' ? this.renderRuns() : view === 'Projects' ? this.renderProjects() : view === 'Instructions' ? this.renderInstructions() : view === 'Settings' ? this.renderSettings() : this.renderCleanup()}
       </main></div>${this.renderDrawer()}<div class="toasts" aria-live="polite">${this.state.toasts.map(t => html`<div role="status" class="toast">${t.message}<button aria-label="Dismiss notification" onClick=${() => this.setState(s => ({toasts:s.toasts.filter(x => x.id !== t.id)}))}>✕</button></div>`)}</div>`;
   }
 }

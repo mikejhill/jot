@@ -63,6 +63,7 @@ class EventKind(StrEnum):
     APPROVAL = "approval"
     RUN_LOG = "run_log"
     RESULT = "result"
+    ROUTING = "routing"
 
 
 type EventValue = str | int | float | bool | list[str] | None
@@ -165,6 +166,8 @@ class Run(Record):
     id: int = 0
     task_id: int
     backend: str
+    harness: str | None = None
+    loadout: str | None = None
     model: str | None = None
     phase: str = Field(pattern="^(plan|execute)$")
     status: str = "pending"

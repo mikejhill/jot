@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, override
@@ -48,14 +49,21 @@ class CopilotBackend(AgentBackend):
     ) -> JsonObject:
         """Ask for JSON matching ``schema`` with all tools disabled."""
         full = (
-            f"{system}\n\n{prompt}\n\nRespond with ONLY one JSON object (no prose, "
+            f"{system}\n{self.instructions}\n\n{prompt}\n\n"
+            "Respond with ONLY one JSON object (no prose, "
             f"no code fences) matching this JSON Schema:\n{json.dumps(schema)}"
         )
         with tempfile.TemporaryDirectory(prefix="jot-copilot-") as scratch:
             args = [*self._base_args(full), *LEAN_ARGS]
+            for name in sorted(self._account_mcp_names()):
+                args += ["--disable-mcp-server", name]
             spec = ProcessSpec(args=tuple(args), cwd=Path(scratch))
             text = ""
             async for event in self._process.stream(spec):
+                if Json.text(event.get("type")) == "result":
+                    premium = Json.obj(event.get("usage")).get("premiumRequests")
+                    if isinstance(premium, (int, float)):
+                        self.last_usage = TokenUsage(premium_requests=float(premium))
                 if Json.text(event.get("type")) == "assistant.message":
                     text = Json.text(Json.obj(event.get("data")).get("content")) or text
         if not text:
@@ -66,11 +74,11 @@ class CopilotBackend(AgentBackend):
     async def run(self, request: RunRequest) -> AsyncIterator[AgentEvent]:
         """Stream a Copilot agent run in the request's working directory."""
         prompt = (
-            f"{request.system}\n\n---\n\n{request.prompt}"
-            if request.system
+            f"{request.system}\n{self.instructions}\n\n---\n\n{request.prompt}"
+            if request.system or self.instructions
             else request.prompt
         )
-        args = self._base_args(prompt, request.model)
+        args = self._base_args(prompt, request.model) + self._loadout_args()
         if request.mode is AgentMode.PLAN:
             args.append(f"--available-tools={PLAN_TOOLS}")
         else:
@@ -112,6 +120,73 @@ class CopilotBackend(AgentBackend):
                 final = mapped.text
             yield mapped
         yield AgentEvent(AgentEventKind.RESULT, final, session_id)
+
+    def _loadout_args(self) -> list[str]:
+        """Translate explicit MCP, plugin, and instruction selections to flags."""
+        args: list[str] = []
+        if self.loadout.mcp != "all":
+            args.append("--disable-builtin-mcps")
+            configured = (
+                self.harness_config.config.mcp_servers if self.harness_config else {}
+            )
+            known = self._account_mcp_names() | set(configured)
+            for name in sorted(known - set(self.loadout.mcp)):
+                args += ["--disable-mcp-server", name]
+            definitions = {
+                name: configured[name]
+                for name in self.loadout.mcp
+                if configured.get(name)
+            }
+            if definitions:
+                args += [
+                    "--additional-mcp-config",
+                    json.dumps({"mcpServers": definitions}),
+                ]
+        if not self.loadout.project_instructions:
+            args.append("--no-custom-instructions")
+        for plugin in self.loadout.plugins:
+            args += ["--plugin-dir", plugin]
+        return args
+
+    @staticmethod
+    def _account_mcp_names() -> set[str]:
+        """Read only configured server names so lean excludes every account MCP."""
+        root = Path(os.environ.get("COPILOT_HOME") or Path.home() / ".copilot")
+        try:
+            data = Json.obj(
+                Json.loads((root / "mcp-config.json").read_text(encoding="utf-8"))
+            )
+        except FileNotFoundError:
+            return set()
+        except OSError as err:
+            raise AgentError(
+                "Cannot inspect Copilot MCP names for loadout isolation"
+            ) from err
+        return set(Json.obj(data.get("mcpServers")))
+
+    @override
+    async def discover(self) -> dict[str, list[str]]:
+        """Collect capability names from Copilot's session initialization events."""
+        found = await super().discover()
+        with tempfile.TemporaryDirectory(prefix="jot-discover-") as scratch:
+            spec = ProcessSpec(
+                args=tuple(self._base_args("Reply OK.")), cwd=Path(scratch)
+            )
+            async for event in self._process.stream(spec):
+                kind = Json.text(event.get("type"))
+                data = Json.obj(event.get("data"))
+                for target, event_kind, key in (
+                    ("skills", "session.skills_loaded", "skills"),
+                    ("mcp", "session.mcp_servers_loaded", "mcpServers"),
+                ):
+                    if kind == event_kind:
+                        items = data.get(key, [])
+                        if isinstance(items, list):
+                            found[target] = [
+                                Json.text(item) or Json.text(Json.obj(item).get("name"))
+                                for item in items
+                            ]
+        return found
 
     def _base_args(self, prompt: str, model: str | None = None) -> list[str]:
         """Return the shared non-interactive command line."""

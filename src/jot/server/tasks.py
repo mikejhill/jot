@@ -51,7 +51,8 @@ class TaskRoutes:
         """Resolve project slugs and reject conflicting project identifiers."""
         values: dict[str, object] = {
             name: getattr(body, name)
-            for name in body.model_fields_set - {"labels", "text"}
+            for name in body.model_fields_set
+            - {"labels", "text", "backend", "harness", "model"}
         }
         if "project" in values:
             if "project_id" in values:
@@ -82,7 +83,12 @@ class TaskRoutes:
             )
             if value
         ]
-        result = self._access.runtime.tasks.create(task, prefilled=prefilled)
+        harness = body.harness or body.backend
+        if harness != "auto" and body.model != "auto":
+            self._access.runtime.config.resolve("triage", harness, body.model)
+        result = self._access.runtime.tasks.create(
+            task, prefilled=prefilled, harness=harness, model=body.model
+        )
         self._access.runtime.changed(result.id)
         return result
 

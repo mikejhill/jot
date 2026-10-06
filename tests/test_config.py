@@ -68,3 +68,19 @@ class TestModelResolution:
         assert config.model_for("claude", "triage") == "haiku"
         assert config.model_for("codex", "plan", " ") is None
         assert config.model_for("codex", "unknown") is None
+
+
+class TestLegacyTriageScope:
+    """Legacy [triage] model only applies to the legacy triage backend."""
+
+    def test_scoped_to_triage_backend(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Codex gets the legacy model; Claude keeps its provider default."""
+        monkeypatch.setenv("JOT_HOME", str(tmp_path))
+        (tmp_path / "config.toml").write_text(
+            '[triage]\nbackend = "codex"\nmodel = "gpt-6-luna"\n', encoding="utf-8"
+        )
+        config = JotHome.resolve().initialize()
+        assert config.model_for("codex", "triage") == "gpt-6-luna"
+        assert config.model_for("claude", "triage") is None

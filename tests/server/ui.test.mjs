@@ -165,7 +165,7 @@ test('model pickers resolve per-action choices with config defaults', () => {
   assert.deepEqual(app.pick('execute'), {backend:'codex', model:'gpt-6-astra'});
   const input = walk(app.renderPicker('plan', 'Plan with')).find(n => n.type === 'input');
   assert.equal(input.props.placeholder, 'default (opus)');
-  assert.equal(walk(app.renderDatalists()).filter(n => n.type === 'option').length, 2);
+  assert.equal(walk(app.renderDatalists()).filter(n => n.type === 'option' && n.props.value !== 'auto').length, 2);
 });
 
 test('run logs render Markdown, collapse tool/thinking runs, and show per-turn usage', () => {
@@ -186,4 +186,41 @@ test('run logs render Markdown, collapse tool/thinking runs, and show per-turn u
   assert(!texts.includes('cache write'), 'unreported fields omitted');
   const none = walk(App.usageParts({}));
   assert(none.some(n => [n.props?.children].flat().includes('tokens not reported')));
+});
+
+test('shared picker shows Auto and action pins and filters model policy', () => {
+  const app = new App();
+  app.state.settings = {actions:{plan:'quick'}, harnesses:{quick:{kind:'fake',label:'Quick',enabled:true,models:{allowed:['small','blocked'],disallowed:['blocked'],default:{plan:'small'}}},gone:{enabled:false,models:{}}}, pins:[{label:'Fast plan',harness:'quick',model:'small',actions:['plan']},{label:'Capture only',harness:'quick',model:'small',actions:['triage']}],model_suggestions:{quick:['small','blocked','other']}};
+  assert.deepEqual(app.modelsFor('quick'), ['small']);
+  assert.equal(app.pick('plan').backend, 'quick');
+  const nodes = walk(app.renderPicker('plan','Plan with'));
+  assert(nodes.some(n => n.type === 'option' && n.props.value === 'auto'));
+  assert(!nodes.some(n => n.type === 'option' && n.props.value === 'gone'));
+  assert(strings(app.renderPicker('plan','Plan with')).includes('Fast plan'));
+  assert(!strings(app.renderPicker('plan','Plan with')).includes('Capture only'));
+  app.state.picks.plan = {backend:'auto'};
+  assert(walk(app.renderPicker('plan','Plan with')).find(n => n.type === 'input').props.disabled);
+});
+
+test('settings renders editable harnesses, action defaults, discovery and pins', () => {
+  const app = new App();
+  app.state.settings = {actions:Object.fromEntries(App.actions.map(a => [a,'test'])),harnesses:{test:{kind:'fake',label:'Test',enabled:true,models:{allowed:[],disallowed:[],default:{}},instructions:{},loadout:{}}},pins:[{label:'Pinned',harness:'test',model:'small'}]};
+  app.state.discovered = {test:{skills:['jot'],mcp:['docs'],plugins:['local-plugin']}};
+  const nodes = walk(app.renderSettings()), text = strings(app.renderSettings());
+  assert(text.includes('Save settings') && text.includes('Discover') && nodes.some(n => n.props?.value === 'Pinned'));
+  assert(nodes.some(n => n.props?.['aria-label'] === 'test plan instructions'));
+  assert(nodes.some(n => n.type === 'fieldset' && n.props.disabled));
+  assert(text.includes('jot') && text.includes('docs') && text.includes('local-plugin'));
+  assert.equal(App.route('#/settings').view, 'Settings');
+  assert(App.eventSummary({kind:'routing',body:{action:'plan',harness:'test',model:'small',reason:'Routine'}}).includes('Routine'));
+  assert(App.loadoutSummary('{"skills":[],"mcp":[],"plugins":[],"project_instructions":true}').includes('repo instructions: on'));
+});
+
+test('capture picker is available without an open task drawer', () => {
+  const app = new App();
+  app.state.loaded = true;
+  const nodes = walk(app.render());
+  assert(nodes.some(n => n.props?.class === 'capture-chip'));
+  assert(!nodes.some(n => n.props?.role === 'dialog'));
+  assert.equal(nodes.filter(n => n.props?.id === 'capture').length, 1);
 });

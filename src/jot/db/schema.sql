@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS task_events (
     id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
     ts TEXT NOT NULL, actor TEXT NOT NULL,
     kind TEXT NOT NULL CHECK(kind IN ('created','enriched','status','comment','plan',
-        'question','answer','approval','run_log','result')),
+        'question','answer','approval','run_log','result','routing')),
     body TEXT NOT NULL CHECK(json_valid(body))
 );
 CREATE INDEX IF NOT EXISTS events_task ON task_events(task_id, id);
@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS runs (
     status TEXT NOT NULL, session_id TEXT, worktree TEXT, branch TEXT, summary TEXT,
     cost REAL, started_at TEXT NOT NULL, ended_at TEXT, model TEXT,
     input_tokens INTEGER, output_tokens INTEGER, cache_read_tokens INTEGER,
-    cache_write_tokens INTEGER, premium_requests REAL
+    cache_write_tokens INTEGER, premium_requests REAL, harness TEXT, loadout TEXT
 );
 CREATE TABLE IF NOT EXISTS cleanup_proposals (
     id INTEGER PRIMARY KEY, created_at TEXT NOT NULL, items TEXT NOT NULL CHECK(json_valid(items)),

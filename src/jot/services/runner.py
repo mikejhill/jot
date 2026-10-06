@@ -31,6 +31,7 @@ from jot.db.repository import ProjectRepository, RunRepository, TaskRepository
 from jot.exceptions import AppError, WorkflowError
 from jot.services.bus import Topic
 from jot.services.instructions import InstructionStore
+from jot.services.routing import Router
 from jot.services.workspace import GitWorkspaces, Workspace
 
 if TYPE_CHECKING:
@@ -210,7 +211,7 @@ class RunService:
             )
         resolved = self.workflow.flow_for(task, flow)
         phase = AgentMode.PLAN if resolved is Flow.PLANNED else AgentMode.EXECUTE
-        return self._launch(task, phase, backend, resolved, model)
+        return await self._launch(task, phase, backend, resolved, model)
 
     async def approve(
         self,
@@ -233,7 +234,7 @@ class RunService:
             self.tasks.audit(
                 task_id, EventKind.APPROVAL, {"text": note or "Approved"}, actor="owner"
             )
-        return self._launch(task, AgentMode.EXECUTE, backend, Flow.PLANNED, model)
+        return await self._launch(task, AgentMode.EXECUTE, backend, Flow.PLANNED, model)
 
     async def send_back(self, task_id: int, comment: str) -> Task:
         """Return a task in awaiting_approval or review to ready with feedback."""
@@ -287,7 +288,9 @@ class RunService:
                     )
         resume = Questions.resume_status(events)
         phase = AgentMode.EXECUTE if resume is Status.EXECUTING else AgentMode.PLAN
-        return self._launch(task, phase, backend, self.workflow.flow_for(task), model)
+        return await self._launch(
+            task, phase, backend, self.workflow.flow_for(task), model
+        )
 
     async def cancel(self, run_id: int) -> None:
         """Stop a running run; its task lease is released by the run itself.
@@ -330,7 +333,7 @@ class RunService:
 
     # Launch and lifecycle
 
-    def _launch(
+    async def _launch(
         self,
         task: Task,
         phase: AgentMode,
@@ -339,9 +342,11 @@ class RunService:
         model: str | None = None,
     ) -> Run:
         """Claim the task, record a run, and schedule the background job."""
-        name = backend or self.config.drawdown.backend
-        resolved = self.config.model_for(name, phase.value, model)
-        agent = BackendRegistry.create(name, resolved)
+        router = Router(self.db, self.home, self.config)
+        name, resolved = await router.resolve(task, phase.value, backend, model)
+        agent = BackendRegistry.configured(
+            self.config, phase.value, name, resolved or "default"
+        )
         owner = f"jot:{name}:{os.getpid()}:{task.id}"
         target = Status.PLANNING if phase is AgentMode.PLAN else Status.EXECUTING
         if not self.workflow.claim(task.id, owner, target, LEASE_SECONDS, flow=flow):
@@ -349,12 +354,29 @@ class RunService:
         run = self.runs.create(
             Run(
                 task_id=task.id,
-                backend=name,
+                backend=agent.name,
+                harness=name,
+                loadout=agent.loadout.model_dump_json(),
                 model=resolved or "default",
                 phase=phase.value,
                 status="running",
             )
         )
+        if router.event:
+            self.logs.mkdir(parents=True, exist_ok=True)
+            with (self.logs / f"{run.id}.jsonl").open("a", encoding="utf-8") as log:
+                log.write(
+                    json.dumps(
+                        {
+                            "kind": "routing",
+                            "text": (
+                                f"Auto: {name} / {resolved or 'default'} — "
+                                f"{router.event['reason']}"
+                            ),
+                        }
+                    )
+                    + "\n"
+                )
         job = asyncio.create_task(self._job(run, agent, owner, phase))
         self._active[run.id] = job
         job.add_done_callback(lambda _: self._active.pop(run.id, None))

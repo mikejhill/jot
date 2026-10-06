@@ -218,7 +218,14 @@ class TaskRepository(Repository[Task]):
         return self._decode(row)
 
     @override
-    def create(self, record: Task, *, prefilled: Iterable[str] = ()) -> Task:
+    def create(
+        self,
+        record: Task,
+        *,
+        prefilled: Iterable[str] = (),
+        harness: str | None = None,
+        model: str | None = None,
+    ) -> Task:
         """Capture an inbox task and atomically append its creation event.
 
         ``prefilled`` names fields the owner set explicitly at capture time
@@ -227,6 +234,8 @@ class TaskRepository(Repository[Task]):
         if record.status != Status.INBOX or record.claimed_by is not None:
             raise RepositoryError("New tasks must be unclaimed inbox captures")
         body: EventBody = {"source": record.source}
+        if harness or model:
+            body.update({"harness": harness, "model": model})
         if fields := ",".join(sorted(set(prefilled))):
             body["prefilled"] = fields
         with self.db.write():

@@ -16,6 +16,7 @@ from jot.db.repository import ProjectRepository, TaskRepository
 from jot.exceptions import AppError
 from jot.services.bus import Topic
 from jot.services.instructions import InstructionStore
+from jot.services.routing import Router
 
 if TYPE_CHECKING:
     from jot.config import Config, JotHome
@@ -151,16 +152,26 @@ class EnrichService:
             AgentError: The backend failed; the task is left unchanged.
         """
         task = self.tasks.get(task_id)
-        name = backend or self.config.triage.backend
-        resolved = self.config.model_for(name, "triage", model)
-        agent = BackendRegistry.create(name, resolved)
+        if backend is None and model is None:
+            for event in self.tasks.events.for_task(task_id):
+                if event.kind is EventKind.CREATED:
+                    backend = str(event.body.get("harness") or "") or None
+                    model = str(event.body.get("model") or "") or None
+        name, resolved = await Router(self.db, self.home, self.config).resolve(
+            task, "triage", backend, model
+        )
+        agent = BackendRegistry.configured(
+            self.config, "triage", name, resolved or "default"
+        )
         data = await agent.structured(SYSTEM, self._prompt(task), TRIAGE_SCHEMA)
         triage = Triage.parse(data, task.title)
         result = self._apply(task, triage, name, resolved or "default")
         self._publish(task_id)
         return result
 
-    async def enrich_pending(self, limit: int = 10) -> list[Task]:
+    async def enrich_pending(
+        self, limit: int = 10, backend: str | None = None, model: str | None = None
+    ) -> list[Task]:
         """Enrich up to ``limit`` unclaimed inbox/ready tasks still needing it.
 
         A failed task gets a comment and a heuristic fallback so it is not retried
@@ -176,7 +187,7 @@ class EnrichService:
         enriched: list[Task] = []
         for task in pending:
             try:
-                enriched.append(await self.enrich(task.id))
+                enriched.append(await self.enrich(task.id, backend, model))
             except AppError as err:
                 logger.warning("enrichment failed for task %s: %s", task.id, err)
                 enriched.append(self._fallback(task, str(err)))

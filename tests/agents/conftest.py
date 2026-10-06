@@ -36,6 +36,7 @@ class ProcessScript:
 def local_scratch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep provider temporary files inside the repository."""
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setenv("COPILOT_HOME", str(tmp_path / "copilot"))
 
 
 @pytest.fixture

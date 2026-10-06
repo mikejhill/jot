@@ -37,6 +37,30 @@ backend = "fake"
 [drawdown]
 backend = "claude"
 default_flow = "planned"
+
+[harnesses.demo-fast]
+kind = "fake"
+label = "Fast triage"
+models.allowed = ["gpt-6-luna", "default"]
+models.default = { triage = "gpt-6-luna" }
+
+[harnesses.demo-deep]
+kind = "fake"
+label = "Careful planner"
+models.default = { plan = "opus", execute = "sonnet" }
+instructions.plan = "Prefer small, reviewable steps with explicit acceptance checks."
+
+[[pins]]
+label = "Quick capture"
+harness = "demo-fast"
+model = "gpt-6-luna"
+actions = ["triage"]
+
+[[pins]]
+label = "Careful plan"
+harness = "demo-deep"
+model = "opus"
+actions = ["plan"]
 """
 
 PLAN = {
@@ -396,6 +420,10 @@ class Screenshots:  # pragma: no cover - needs a browser; run by the CI e2e job
         page.locator(".run-log .structured").first.wait_for()
         self._scroll_to(page, ".drawer .runs")
         written.append(self._save(page, "task-plan"))
+        page.keyboard.press("Escape")
+        page.get_by_role("button", name="Settings").click()
+        page.get_by_role("button", name="Save settings").wait_for()
+        written.append(self._save(page, "settings"))
         return written
 
     def _scroll_to(self, page: Page, selector: str) -> None:

@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Annotated
 
 import typer
 
+from jot.agents.registry import BackendRegistry
 from jot.core.models import Flow, Run
 from jot.db.repository import RunRepository, TaskRepository
 from jot.exceptions import WorkflowError
@@ -19,6 +20,7 @@ from jot.services.bus import EventBus, Topic
 from jot.services.cleanup import CleanupService
 from jot.services.enrich import EnrichService
 from jot.services.runner import RunService
+from jot.services.settings import SettingsStore
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -26,7 +28,8 @@ if TYPE_CHECKING:
     from jot.cli import CommandLine
 
 BackendOption = Annotated[
-    str | None, typer.Option("--backend", help="claude, codex, or copilot")
+    str | None,
+    typer.Option("--harness", "--backend", help="Configured harness id or auto"),
 ]
 JsonFlag = Annotated[bool, typer.Option("--json")]
 ModelOption = Annotated[
@@ -63,6 +66,53 @@ class AgentCommands:
         cleanup.command("show")(self.cleanup_show)
         cleanup.command("apply")(self.cleanup_apply)
         app.add_typer(cleanup, name="cleanup")
+        harness = typer.Typer(no_args_is_help=True)
+        harness.command("ls")(self.harness_ls)
+        harness.command("show")(self.harness_show)
+        harness.command("discover")(self.harness_discover)
+        app.add_typer(harness, name="harness")
+        pins = typer.Typer(no_args_is_help=True)
+        pins.command("ls")(self.pins_ls)
+        app.add_typer(pins, name="pins")
+
+    def harness_ls(self, *, json: JsonFlag = False) -> None:
+        """List all configured harnesses and their kinds."""
+        with self.cli.session(json=json) as (_, _, home):
+            values = SettingsStore.effective(home.initialize())["harnesses"]
+            rows = values.items() if isinstance(values, dict) else []
+            lines = ["ID\tKIND\tENABLED\tLABEL"] + [
+                f"{key}\t{item.get('kind')}\t{item.get('enabled')}\t{item.get('label')}"
+                for key, item in rows
+                if isinstance(item, dict)
+            ]
+            self.cli.emit(values, "\n".join(lines) + "\n", json=json)
+
+    def harness_show(self, harness_id: str, *, json: JsonFlag = False) -> None:
+        """Show the complete configuration of a named harness."""
+        with self.cli.session(json=json) as (_, _, home):
+            config = home.initialize()
+            harness = config.effective_harnesses().get(harness_id)
+            if harness is None:
+                raise WorkflowError(f"Unknown harness {harness_id!r}")
+            self.cli.emit(
+                harness.model_dump(),
+                harness.model_dump_json(indent=2) + "\n",
+                json=json,
+            )
+
+    def harness_discover(self, harness_id: str, *, json: JsonFlag = False) -> None:
+        """Run one cheap discovery session for a configured harness."""
+        with self.cli.session(json=json) as (_, _, home):
+            result = asyncio.run(
+                BackendRegistry.discover(home.initialize(), harness_id)
+            )
+            self.cli.emit(result, str(result) + "\n", json=json)
+
+    def pins_ls(self, *, json: JsonFlag = False) -> None:
+        """List global shortcuts and their optional action filters."""
+        with self.cli.session(json=json) as (_, _, home):
+            pins = [pin.model_dump(exclude_none=True) for pin in home.initialize().pins]
+            self.cli.emit(pins, str(pins) + "\n", json=json)
 
     def enrich(
         self,
@@ -80,7 +130,9 @@ class AgentCommands:
                     asyncio.run(service.enrich(i, backend, model)) for i in task_ids
                 ]
             else:
-                tasks = asyncio.run(service.enrich_pending(limit=1000))
+                tasks = asyncio.run(
+                    service.enrich_pending(limit=1000, backend=backend, model=model)
+                )
             lines = [
                 f"{t.id}\t{t.status}\t{t.criticality}\t{t.title}"
                 f"\t[{', '.join(t.labels)}]"

@@ -45,6 +45,11 @@ class ActionRoutes:
             "/cleanup/{proposal_id}", self.proposal, methods=["GET"]
         )
 
+    def _check_pick(self, action: str, harness: str | None, model: str | None) -> None:
+        """Validate dynamic harness IDs and policies at the HTTP boundary."""
+        if harness != "auto" and model != "auto":
+            self._access.runtime.config.resolve(action, harness, model)
+
     async def enrich(
         self,
         task_id: int,
@@ -52,8 +57,9 @@ class ActionRoutes:
     ) -> Task:
         """Enrich one task and notify connected clients."""
         body = body or Enrichment()
+        self._check_pick("triage", body.harness or body.backend, body.model)
         result = await self._access.runtime.enrich.enrich(
-            task_id, backend=body.backend, model=body.model
+            task_id, backend=body.harness or body.backend, model=body.model
         )
         self._access.runtime.changed(task_id)
         return result
@@ -74,11 +80,16 @@ class ActionRoutes:
     ) -> Run:
         """Start a planned or direct run using the selected backend."""
         body = body or RunRequest()
+        self._check_pick(
+            "execute" if body.flow == "direct" else "plan",
+            body.harness or body.backend,
+            body.model,
+        )
         return self._run_changed(
             await self._access.runtime.runner.start(
                 task_id,
                 flow=body.flow,
-                backend=body.backend,
+                backend=body.harness or body.backend,
                 model=body.model,
             )
         )
@@ -90,11 +101,12 @@ class ActionRoutes:
     ) -> Run:
         """Approve a plan and request its execution."""
         body = body or Approval()
+        self._check_pick("execute", body.harness or body.backend, body.model)
         return self._run_changed(
             await self._access.runtime.runner.approve(
                 task_id,
                 note=body.note,
-                backend=body.backend,
+                backend=body.harness or body.backend,
                 model=body.model,
             )
         )
@@ -105,7 +117,7 @@ class ActionRoutes:
             await self._access.runtime.runner.respond(
                 task_id,
                 {a.question_id: a.text for a in body.answers},
-                backend=body.backend,
+                backend=body.harness or body.backend,
                 model=body.model,
             )
         )
@@ -146,7 +158,9 @@ class ActionRoutes:
         body = body or Scan()
         cleanup = self._access.runtime.cleanup
         proposal_id = await cleanup.scan(
-            use_agent=body.use_agent, backend=body.backend, model=body.model
+            use_agent=body.use_agent,
+            backend=body.harness or body.backend,
+            model=body.model,
         )
         return {"id": proposal_id}
 

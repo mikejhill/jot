@@ -18,6 +18,7 @@ from jot.core.workflow import Workflow
 from jot.db.repository import ProjectRepository, TaskRepository
 from jot.exceptions import AppError, NotFoundError
 from jot.services.instructions import InstructionStore
+from jot.services.routing import Router
 
 if TYPE_CHECKING:
     from jot.config import Config, JotHome
@@ -279,9 +280,13 @@ class CleanupService:
             "heuristic items you agree with, drop ones you don't (omit them), and add "
             "others you find. Every item needs a specific reason."
         )
-        name = backend or self.config.triage.backend
-        agent = BackendRegistry.create(
-            name, self.config.model_for(name, "cleanup", model)
+        if not tasks:
+            return []
+        name, resolved = await Router(self.db, self.home, self.config).resolve(
+            tasks[0], "cleanup", backend, model
+        )
+        agent = BackendRegistry.configured(
+            self.config, "cleanup", name, resolved or "default"
         )
         try:
             data = await agent.structured(
