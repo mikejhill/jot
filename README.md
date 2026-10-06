@@ -36,7 +36,7 @@ jot install-skills --target claude --target codex --target copilot
 jot serve --open                                        # http://127.0.0.1:8765
 ```
 
-Data lives in `~/.jot` by default (`JOT_HOME` overrides it). From a clone, use `uv tool install --editable .` so code changes apply without reinstalling.
+Data lives in `~/.jot` by default (`JOT_HOME` overrides it). From a clone, use `uv tool install --editable .` so code changes apply without reinstalling. If an update adds a dependency, stop `jot serve` and run `uv tool install --force --editable .` once to pick it up.
 
 ## Documentation
 
