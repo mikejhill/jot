@@ -205,6 +205,15 @@ class EnrichService:
             ]
         )
 
+    def _prefilled_fields(self, task_id: int) -> set[str]:
+        """Return fields the owner set explicitly when capturing the task."""
+        for event in self.tasks.events.for_task(task_id):
+            if event.kind is EventKind.CREATED:
+                return {
+                    f for f in str(event.body.get("prefilled") or "").split(",") if f
+                }
+        return set()
+
     def _prefilled(self, task: Task) -> str:
         """Describe fields the owner already supplied at capture time."""
         parts = []
@@ -214,6 +223,11 @@ class EnrichService:
             parts.append(f"labels: {', '.join(task.labels)}")
         if task.project_id is not None:
             parts.append(f"project: {self.projects.get(task.project_id).slug}")
+        kept = self._prefilled_fields(task.id)
+        if "criticality" in kept:
+            parts.append(f"criticality: {task.criticality}")
+        if "type" in kept:
+            parts.append(f"type: {task.type}")
         return "\n".join(parts) or "(none)"
 
     def _top_labels(self) -> list[str]:
@@ -228,6 +242,7 @@ class EnrichService:
     def _apply(self, task: Task, triage: Triage, backend: str, model: str) -> Task:
         """Persist triage output, add labels/questions, and promote when confident."""
         project_id = task.project_id or self._project_id(triage)
+        kept = self._prefilled_fields(task.id)
         changes: dict[str, object] = {
             "description": triage.description,
             "criticality": triage.criticality,
@@ -235,6 +250,8 @@ class EnrichService:
             "project_id": project_id,
             "needs_enrichment": False,
         }
+        for field in kept & {"description", "criticality", "type"}:
+            del changes[field]  # the owner set it explicitly at capture
         if task.title == task.raw_input:
             changes["title"] = triage.title
         with self.db.write():

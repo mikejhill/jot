@@ -5,6 +5,7 @@ from __future__ import annotations
 import builtins
 import json
 import sqlite3
+from collections.abc import Iterable
 from typing import ClassVar, override
 
 from jot.core.models import (
@@ -217,13 +218,20 @@ class TaskRepository(Repository[Task]):
         return self._decode(row)
 
     @override
-    def create(self, record: Task) -> Task:
-        """Capture an inbox task and atomically append its creation event."""
+    def create(self, record: Task, *, prefilled: Iterable[str] = ()) -> Task:
+        """Capture an inbox task and atomically append its creation event.
+
+        ``prefilled`` names fields the owner set explicitly at capture time
+        (e.g. ``criticality``); enrichment keeps them instead of overwriting.
+        """
         if record.status != Status.INBOX or record.claimed_by is not None:
             raise RepositoryError("New tasks must be unclaimed inbox captures")
+        body: EventBody = {"source": record.source}
+        if fields := ",".join(sorted(set(prefilled))):
+            body["prefilled"] = fields
         with self.db.write():
             task = super().create(record)
-            self.audit(task.id, EventKind.CREATED, {"source": task.source})
+            self.audit(task.id, EventKind.CREATED, body)
             for label in record.labels:
                 self.label(task.id, label)
         return self.get(task.id)

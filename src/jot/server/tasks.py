@@ -72,7 +72,17 @@ class TaskRoutes:
             | values
             | {"raw_input": body.text, "source": "ui", "labels": body.labels or []}
         )
-        result = self._access.runtime.tasks.create(task)
+        prefilled = [
+            name
+            for name, value in (
+                ("criticality", body.criticality),
+                ("type", body.type),
+                ("project", body.project),
+                ("description", body.description),
+            )
+            if value
+        ]
+        result = self._access.runtime.tasks.create(task, prefilled=prefilled)
         self._access.runtime.changed(result.id)
         return result
 

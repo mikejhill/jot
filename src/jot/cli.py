@@ -160,7 +160,16 @@ class CommandLine:
                     criticality=crit or Criticality.MEDIUM,
                     type=type_ or TaskType.IDEA,
                     repo_path=repo,
-                )
+                ),
+                prefilled=[
+                    name
+                    for name, value in (
+                        ("criticality", crit),
+                        ("type", type_),
+                        ("project", project),
+                    )
+                    if value
+                ],
             )
         if not wait:
             self.emit({"id": task.id}, f"{task.id}\n", json=json)

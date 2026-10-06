@@ -89,6 +89,21 @@ class TestEnrich:
             is None
         )
 
+    def test_owner_prefilled_fields_survive(
+        self, db: Database, home: JotHome, config: Config
+    ) -> None:
+        """Criticality and type set at capture are not overwritten by triage."""
+        FakeBackend.canned = triage(criticality="low", type="idea")
+        task = TaskRepository(db).create(
+            Task(title=NOTE, raw_input=NOTE, criticality="critical", type="bug"),
+            prefilled=["criticality", "type"],
+        )
+        service = EnrichService(db, home, config)
+        assert "criticality: critical" in service._prompt(task)
+        result = asyncio.run(service.enrich(task.id))
+        assert (result.criticality, result.type) == (Criticality.CRITICAL, TaskType.BUG)
+        assert result.description == "Check internals."
+
     def test_parse_defaults(self) -> None:
         """Bad fields fall back to safe defaults."""
         parsed = Triage.parse(
