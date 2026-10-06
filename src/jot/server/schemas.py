@@ -68,6 +68,7 @@ class RunRequest(Record):
 
     flow: Flow | None = None
     backend: Backend | None = None
+    model: str | None = Field(default=None, max_length=200)
 
 
 class Approval(Record):
@@ -75,12 +76,14 @@ class Approval(Record):
 
     note: str | None = None
     backend: Backend | None = None
+    model: str | None = Field(default=None, max_length=200)
 
 
 class Enrichment(Record):
     """Optional enrichment backend override."""
 
     backend: Backend | None = None
+    model: str | None = Field(default=None, max_length=200)
 
 
 class Markdown(Record):
@@ -93,6 +96,8 @@ class Scan(Record):
     """Whether cleanup may consult an agent."""
 
     use_agent: bool = False
+    backend: Backend | None = None
+    model: str | None = Field(default=None, max_length=200)
 
 
 class ApplyCleanup(Record):

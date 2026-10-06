@@ -55,3 +55,30 @@ test('project editor selects the saved flow', () => {
   const field = walk(editor.render(props)).find(n => n.props?.name === 'default_flow');
   assert.equal(field.props.value, 'direct');
 });
+
+test('list rows offer one-click actions per status and expand inline', () => {
+  const app = new App();
+  const labels = status => walk(app.rowActions({...task, status}))
+    .filter(n => n.type === 'button').map(n => [n.props.children].flat().join(''));
+  Object.assign(app.state, {runs:[{id:9,task_id:1,ended_at:null}]});
+  assert.deepEqual(labels('ready'), ['Plan', 'Run now']);
+  assert.deepEqual(labels('awaiting_approval'), ['Approve', 'Send back']);
+  assert.deepEqual(labels('executing'), ['Cancel']);
+  assert.deepEqual(labels('review'), ['Done', 'Send back']);
+  assert.deepEqual(labels('done'), []);
+  const detail = {events:[{kind:'plan',body:{text:'Step 1'}},{kind:'question',body:{text:'Which DB?'}}]};
+  const texts = walk(app.renderExpanded({...task, status:'awaiting_approval'}, detail))
+    .flatMap(n => [n.props?.children].flat()).filter(c => typeof c === 'string');
+  assert(texts.includes('Step 1') && texts.includes('Which DB?'));
+});
+
+test('model pickers resolve per-action choices with config defaults', () => {
+  const app = new App();
+  Object.assign(app.state, {backend:'claude', config:{model_defaults:{claude:{plan:'opus'}}, model_suggestions:{claude:['opus','sonnet']}},
+    picks:{plan:{backend:'claude', model:''}, execute:{backend:'codex', model:'gpt-6-astra'}}});
+  assert.deepEqual(app.pick('plan'), {backend:'claude', model:null});
+  assert.deepEqual(app.pick('execute'), {backend:'codex', model:'gpt-6-astra'});
+  const input = walk(app.renderPicker('plan', 'Plan with')).find(n => n.type === 'input');
+  assert.equal(input.props.placeholder, 'default (opus)');
+  assert.equal(walk(app.renderDatalists()).filter(n => n.type === 'option').length, 2);
+});

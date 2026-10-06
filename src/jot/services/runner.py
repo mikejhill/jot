@@ -113,7 +113,12 @@ class RunService:
     # Public API
 
     async def start(
-        self, task_id: int, *, flow: Flow | None = None, backend: str | None = None
+        self,
+        task_id: int,
+        *,
+        flow: Flow | None = None,
+        backend: str | None = None,
+        model: str | None = None,
     ) -> Run:
         """Claim a ready task and launch its next phase in the background.
 
@@ -129,10 +134,14 @@ class RunService:
             )
         resolved = self.workflow.flow_for(task, flow)
         phase = AgentMode.PLAN if resolved is Flow.PLANNED else AgentMode.EXECUTE
-        return self._launch(task, phase, backend, resolved)
+        return self._launch(task, phase, backend, resolved, model)
 
     async def approve(
-        self, task_id: int, note: str | None = None, backend: str | None = None
+        self,
+        task_id: int,
+        note: str | None = None,
+        backend: str | None = None,
+        model: str | None = None,
     ) -> Run:
         """Approve an awaiting_approval plan and launch the execute run.
 
@@ -148,7 +157,7 @@ class RunService:
             self.tasks.audit(
                 task_id, EventKind.APPROVAL, {"text": note or "Approved"}, actor="owner"
             )
-        return self._launch(task, AgentMode.EXECUTE, backend, Flow.PLANNED)
+        return self._launch(task, AgentMode.EXECUTE, backend, Flow.PLANNED, model)
 
     async def send_back(self, task_id: int, comment: str) -> Task:
         """Return a task in awaiting_approval or review to ready with feedback."""
@@ -202,17 +211,29 @@ class RunService:
     # Launch and lifecycle
 
     def _launch(
-        self, task: Task, phase: AgentMode, backend: str | None, flow: Flow
+        self,
+        task: Task,
+        phase: AgentMode,
+        backend: str | None,
+        flow: Flow,
+        model: str | None = None,
     ) -> Run:
         """Claim the task, record a run, and schedule the background job."""
         name = backend or self.config.drawdown.backend
-        agent = BackendRegistry.create(name)
+        resolved = self.config.model_for(name, phase.value, model)
+        agent = BackendRegistry.create(name, resolved)
         owner = f"jot:{name}:{os.getpid()}:{task.id}"
         target = Status.PLANNING if phase is AgentMode.PLAN else Status.EXECUTING
         if not self.workflow.claim(task.id, owner, target, LEASE_SECONDS, flow=flow):
             raise WorkflowError(f"Task {task.id} is already claimed by another agent")
         run = self.runs.create(
-            Run(task_id=task.id, backend=name, phase=phase.value, status="running")
+            Run(
+                task_id=task.id,
+                backend=name,
+                model=resolved or "default",
+                phase=phase.value,
+                status="running",
+            )
         )
         job = asyncio.create_task(self._job(run, agent, owner, phase))
         self._active[run.id] = job

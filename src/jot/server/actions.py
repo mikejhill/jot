@@ -48,7 +48,9 @@ class ActionRoutes:
     ) -> Task:
         """Enrich one task and notify connected clients."""
         body = body or Enrichment()
-        result = await self._access.runtime.enrich.enrich(task_id, backend=body.backend)
+        result = await self._access.runtime.enrich.enrich(
+            task_id, backend=body.backend, model=body.model
+        )
         self._access.runtime.changed(task_id)
         return result
 
@@ -73,6 +75,7 @@ class ActionRoutes:
                 task_id,
                 flow=body.flow,
                 backend=body.backend,
+                model=body.model,
             )
         )
 
@@ -88,6 +91,7 @@ class ActionRoutes:
                 task_id,
                 note=body.note,
                 backend=body.backend,
+                model=body.model,
             )
         )
 
@@ -119,7 +123,11 @@ class ActionRoutes:
     async def scan(self, body: Annotated[Scan | None, Body()] = None) -> dict[str, int]:
         """Create a proposal without applying any item."""
         body = body or Scan()
-        return {"id": await self._access.runtime.cleanup.scan(use_agent=body.use_agent)}
+        cleanup = self._access.runtime.cleanup
+        proposal_id = await cleanup.scan(
+            use_agent=body.use_agent, backend=body.backend, model=body.model
+        )
+        return {"id": proposal_id}
 
     async def proposal(self, proposal_id: int) -> dict[str, object]:
         """Return a reviewable cleanup proposal."""

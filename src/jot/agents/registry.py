@@ -11,6 +11,12 @@ from jot.agents.copilot import CopilotBackend
 from jot.agents.fake import FakeBackend
 
 DEFAULT_MODEL = "default"
+# Suggestions shown in the UI model picker; any model id the CLI accepts works.
+MODEL_SUGGESTIONS: dict[str, list[str]] = {
+    "claude": ["opus", "sonnet", "haiku"],
+    "codex": ["gpt-6.1-sol", "gpt-6-astra", "gpt-6-luna", "gpt-6-sol"],
+    "copilot": ["auto", "claude-sonnet-4.5", "gpt-5"],
+}
 
 
 class BackendRegistry:

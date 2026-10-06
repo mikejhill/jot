@@ -13,6 +13,8 @@ import pytest
 from jot.config import JotHome
 from jot.db.connection import Database
 
+TEST_ROOT = Path(__file__).resolve().parents[1] / ".tmp" / "tests"
+
 
 class ReadOnlyCleanup:
     """Remove trees containing read-only files (git objects on Windows)."""
@@ -31,10 +33,16 @@ def tmp_path() -> Iterator[Path]:
     Python's Windows mode 0700 directories exclude the sandbox capability SID;
     pytest's default temporary directory fixture uses that mode.
     """
-    path = Path(__file__).resolve().parents[1] / ".tmp" / "tests" / uuid4().hex
+    path = TEST_ROOT / uuid4().hex
     path.mkdir(parents=True)
     yield path
     rmtree(path, onexc=ReadOnlyCleanup.retry)
+
+
+@pytest.fixture(autouse=True)
+def git_ceiling(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stop git from treating test folders as part of the enclosing jot repo."""
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(TEST_ROOT))
 
 
 @pytest.fixture

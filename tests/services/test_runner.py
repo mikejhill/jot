@@ -250,3 +250,33 @@ class TestPlanOutcome:
     def test_app_error_type(self) -> None:
         """Workspace errors are application errors."""
         assert issubclass(WorkspaceError, AppError)
+
+
+class TestModels:
+    """Per-action model resolution reaches runs."""
+
+    def test_override_and_config_default(
+        self, db: Database, home: JotHome, harness: Harness
+    ) -> None:
+        """Explicit models win; config models apply per action; else default."""
+        (home.path / "config.toml").write_text(
+            '[drawdown]\nbackend = "fake"\n[models.fake]\nplan = "opus"\n',
+            encoding="utf-8",
+        )
+        service = RunService(db, home, home.initialize(), EventBus())
+        first, second = harness.ready("one"), harness.ready("two")
+
+        async def scenario() -> tuple[Run, Run, Run]:
+            plan = await service.wait((await service.start(first.id)).id)
+            execute = await service.wait(
+                (await service.approve(first.id, model="sonnet")).id
+            )
+            direct = await service.wait(
+                (await service.start(second.id, flow=Flow.DIRECT)).id
+            )
+            return plan, execute, direct
+
+        plan, execute, direct = asyncio.run(scenario())
+        assert plan.model == "opus"
+        assert execute.model == "sonnet"
+        assert direct.model == "default"

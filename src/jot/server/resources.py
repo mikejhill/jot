@@ -10,6 +10,8 @@ from pathlib import Path
 from fastapi import APIRouter
 from starlette.responses import StreamingResponse
 
+from jot.agents.registry import MODEL_SUGGESTIONS, BackendRegistry
+from jot.config import ACTIONS
 from jot.core.models import Project
 from jot.exceptions import NotFoundError, RepositoryError
 from jot.server.runtime import EventStream, RuntimeAccess
@@ -120,8 +122,16 @@ class ResourceRoutes:
 
     async def config(self) -> dict[str, object]:
         """Expose read-only defaults and supported backend choices."""
-        return asdict(self._access.runtime.config) | {
-            "backends": ["claude", "codex", "copilot"]
+        config = self._access.runtime.config
+        backends = BackendRegistry.names()
+        defaults = {
+            name: {action: config.model_for(name, action) for action in ACTIONS}
+            for name in backends
+        }
+        return asdict(config) | {
+            "backends": backends,
+            "model_defaults": defaults,
+            "model_suggestions": MODEL_SUGGESTIONS,
         }
 
     async def stream(self) -> StreamingResponse:

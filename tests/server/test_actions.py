@@ -22,24 +22,34 @@ class FakeRunner(RunService):
 
     @override
     async def start(
-        self, task_id: int, *, flow: Flow | None = None, backend: str | None = None
+        self,
+        task_id: int,
+        *,
+        flow: Flow | None = None,
+        backend: str | None = None,
+        model: str | None = None,
     ) -> Run:
-        """Record backend and requested run phase."""
+        """Record backend, model, and requested run phase."""
         return RunRepository(self.db).create(
             Run(
                 task_id=task_id,
                 backend=backend or "claude",
+                model=model,
                 phase="execute" if flow == Flow.DIRECT else "plan",
             )
         )
 
     @override
     async def approve(
-        self, task_id: int, note: str | None = None, backend: str | None = None
+        self,
+        task_id: int,
+        note: str | None = None,
+        backend: str | None = None,
+        model: str | None = None,
     ) -> Run:
         """Record the approval note then produce an execute run."""
         TaskRepository(self.db).audit(task_id, EventKind.APPROVAL, {"note": note})
-        return await self.start(task_id, flow=Flow.DIRECT, backend=backend)
+        return await self.start(task_id, flow=Flow.DIRECT, backend=backend, model=model)
 
     @override
     async def send_back(self, task_id: int, comment: str) -> Task:
@@ -60,8 +70,15 @@ class FakeCleanup(CleanupService):
     """Return a fixed review proposal and apply only requested item indexes."""
 
     @override
-    async def scan(self, *, use_agent: bool = False) -> int:
+    async def scan(
+        self,
+        *,
+        use_agent: bool = False,
+        backend: str | None = None,
+        model: str | None = None,
+    ) -> int:
         """Expose the selected scan policy through a deterministic proposal id."""
+        del backend, model
         return 2 if use_agent else 1
 
     @override
@@ -95,11 +112,15 @@ class ProviderBoundary:
 
     @staticmethod
     async def enrich(
-        service: EnrichService, task_id: int, backend: str | None = None
+        service: EnrichService,
+        task_id: int,
+        backend: str | None = None,
+        model: str | None = None,
     ) -> Task:
         """Store the backend as a title to prove the override reached the service."""
         return TaskRepository(service.db).update(
-            task_id, {"title": backend or "Enriched", "needs_enrichment": False}
+            task_id,
+            {"title": model or backend or "Enriched", "needs_enrichment": False},
         )
 
     @staticmethod
@@ -109,9 +130,10 @@ class ProviderBoundary:
         *,
         flow: Flow | None = None,
         backend: str | None = None,
+        model: str | None = None,
     ) -> Run:
         """Model an implementation that has not landed yet."""
-        del task_id, flow, backend
+        del task_id, flow, backend, model
         raise NotImplementedAppError("runs are not implemented yet")
 
     @staticmethod
@@ -134,15 +156,19 @@ class TestActions:
             task_id = client.post("/api/tasks", json={"text": "Build it"}).json()["id"]
             base = f"/api/tasks/{task_id}"
             first = client.post(
-                base + "/run", json={"flow": "direct", "backend": "codex"}
+                base + "/run",
+                json={"flow": "direct", "backend": "codex", "model": "gpt-6-astra"},
             ).json()
             assert first["phase"] == "execute"
             assert first["backend"] == "codex"
+            assert first["model"] == "gpt-6-astra"
             assert client.post(base + "/run").json()["phase"] == "plan"
             approved = client.post(
-                base + "/approve", json={"note": "Ship the plan", "backend": "copilot"}
+                base + "/approve",
+                json={"note": "Ship it", "backend": "claude", "model": "sonnet"},
             ).json()
-            assert approved["backend"] == "copilot"
+            assert approved["backend"] == "claude"
+            assert approved["model"] == "sonnet"
             assert client.post(base + "/approve").status_code == 200
             assert (
                 client.post(
@@ -170,7 +196,7 @@ class TestActions:
                 == 422
             )
             events = client.get(base).json()["events"]
-            assert any(e["body"].get("note") == "Ship the plan" for e in events)
+            assert any(e["body"].get("note") == "Ship it" for e in events)
 
     def test_service_errors(
         self, client: TestClient, monkeypatch: pytest.MonkeyPatch

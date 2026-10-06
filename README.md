@@ -61,6 +61,10 @@ jot send-back 12 "use the existing retry helper"   # -> ready, feedback kept for
 jot runs 12; jot log <run-id>
 ```
 
+**Choosing models.** Every action can use a different model. Set defaults per backend and action in `config.toml` (`[models.claude] plan = "opus"`, `execute = "sonnet"`, and so on; `"default"` means the provider's default). Override any single run with `--model` on `jot plan`, `run`, `approve`, `enrich`, and `cleanup scan`, or with the model pickers in the UI. Each run records the model it used (`jot runs`).
+
+**One-click list.** The List view shows Plan / Run now, Approve / Send back, Done, or Cancel buttons on every row, depending on status. Use the "Plan with" and "Execute with" pickers above the table to choose backends and models. Expand a row (▸) to read the latest plan and open questions and approve it inline. Presets: Open, Needs attention, Ready, In progress, All.
+
 In the UI, open a task to use **Plan first**, **Run now (direct)**, **Approve**, and **Send back**, with a backend picker and a live log. The List view supports bulk actions.
 
 - **Where agents work:** the task's `repo_path`, or else the project's `repo_path`, or else a scratch folder. Execution in a git repo happens in a worktree, `<repo>.jot/<id>-<slug>`, on branch `jot/<id>-<slug>`. The agent commits there and never pushes. You review and merge.

@@ -29,6 +29,10 @@ BackendOption = Annotated[
     str | None, typer.Option("--backend", help="claude, codex, or copilot")
 ]
 JsonFlag = Annotated[bool, typer.Option("--json")]
+ModelOption = Annotated[
+    str | None,
+    typer.Option("--model", help="Model for this action (e.g. opus, gpt-6-astra)"),
+]
 SKILL_TARGETS = {
     "claude": Path(".claude") / "skills",
     "codex": Path(".codex") / "skills",
@@ -63,13 +67,16 @@ class AgentCommands:
         task_ids: Annotated[list[int] | None, typer.Argument()] = None,
         *,
         backend: BackendOption = None,
+        model: ModelOption = None,
         json: JsonFlag = False,
     ) -> None:
         """Enrich given tasks, or every task still waiting for enrichment."""
         with self.cli.session(json=json) as (db, _, home):
             service = EnrichService(db, home, home.initialize())
             if task_ids:
-                tasks = [asyncio.run(service.enrich(i, backend)) for i in task_ids]
+                tasks = [
+                    asyncio.run(service.enrich(i, backend, model)) for i in task_ids
+                ]
             else:
                 tasks = asyncio.run(service.enrich_pending(limit=1000))
             lines = [
@@ -83,13 +90,14 @@ class AgentCommands:
                 json=json,
             )
 
-    def plan(
+    def plan(  # noqa: PLR0913 - Typer requires one parameter per CLI option
         self,
         task_id: Annotated[int | None, typer.Argument()] = None,
         *,
         next_: Annotated[bool, typer.Option("--next")] = False,
         project: Annotated[str | None, typer.Option("--project")] = None,
         backend: BackendOption = None,
+        model: ModelOption = None,
         json: JsonFlag = False,
     ) -> None:
         """Run a read-only planning pass; the task then awaits your approval."""
@@ -99,6 +107,7 @@ class AgentCommands:
             next_=next_,
             project=project,
             backend=backend,
+            model=model,
             json=json,
         )
 
@@ -112,6 +121,7 @@ class AgentCommands:
         next_: Annotated[bool, typer.Option("--next")] = False,
         project: Annotated[str | None, typer.Option("--project")] = None,
         backend: BackendOption = None,
+        model: ModelOption = None,
         json: JsonFlag = False,
     ) -> None:
         """Draw down a ready task using its flow (or --direct to execute now)."""
@@ -121,6 +131,7 @@ class AgentCommands:
             next_=next_,
             project=project,
             backend=backend,
+            model=model,
             json=json,
         )
 
@@ -130,10 +141,13 @@ class AgentCommands:
         *,
         note: Annotated[str | None, typer.Option("--note")] = None,
         backend: BackendOption = None,
+        model: ModelOption = None,
         json: JsonFlag = False,
     ) -> None:
         """Approve a plan (answers go in --note) and execute it now."""
-        self._drive(lambda service: service.approve(task_id, note, backend), json=json)
+        self._drive(
+            lambda service: service.approve(task_id, note, backend, model), json=json
+        )
 
     def send_back(self, task_id: int, comment: str, *, json: JsonFlag = False) -> None:
         """Return a planned or reviewed task to ready with feedback."""
@@ -158,7 +172,8 @@ class AgentCommands:
                 if task_id is None or r.task_id == task_id
             ]
             lines = [
-                f"{r.id}\ttask {r.task_id}\t{r.phase}\t{r.backend}\t{r.status}"
+                f"{r.id}\ttask {r.task_id}\t{r.phase}"
+                f"\t{r.backend}/{r.model or 'default'}\t{r.status}"
                 f"\t{r.branch or ''}"
                 for r in runs
             ]
@@ -185,6 +200,7 @@ class AgentCommands:
         next_: bool,
         project: str | None,
         backend: str | None,
+        model: str | None,
         json: bool,
     ) -> None:
         """Resolve the task (explicit id or --next) and drive its run."""
@@ -198,7 +214,7 @@ class AgentCommands:
                 if not ranked:
                     raise WorkflowError("No ready tasks")
                 chosen = ranked[0].id
-            return await service.start(chosen, flow=flow, backend=backend)
+            return await service.start(chosen, flow=flow, backend=backend, model=model)
 
         self._drive(launch, json=json)
 
@@ -244,12 +260,16 @@ class AgentCommands:
         agent: Annotated[
             bool, typer.Option("--agent", help="Add an LLM review pass")
         ] = False,
+        backend: BackendOption = None,
+        model: ModelOption = None,
         json: JsonFlag = False,
     ) -> None:
         """Create a cleanup proposal; nothing changes until you apply items."""
         with self.cli.session(json=json) as (db, _, home):
             service = CleanupService(db, home, home.initialize())
-            proposal_id = asyncio.run(service.scan(use_agent=agent))
+            proposal_id = asyncio.run(
+                service.scan(use_agent=agent, backend=backend, model=model)
+            )
             self._show_proposal(service, proposal_id, json=json)
 
     def cleanup_show(

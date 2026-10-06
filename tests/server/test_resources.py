@@ -86,6 +86,8 @@ class TestResources:
         config = client.get("/api/config").json()
         assert config["backends"] == ["claude", "codex", "copilot"]
         assert config["server"] == {"host": "127.0.0.1", "port": 8765}
+        assert config["model_defaults"]["claude"]["plan"] is None
+        assert "opus" in config["model_suggestions"]["claude"]
         assert client.put("/api/config", json={}).status_code == 405
         for path in (
             "/",

@@ -90,7 +90,7 @@ class App extends Component {
   constructor() {
     super();
     this.state = {view:'Board', tasks:[], projects:[], runs:[], labels:[], filters:{sort:'priority'}, selected:[], detail:null,
-      backend:'claude', connected:false, toasts:[], instructionNames:[], instruction:'triage.md', markdown:'', instructionDirty:false,
+      backend:'claude', picks:App.loadPicks(), config:null, preset:'open', expanded:{}, connected:false, toasts:[], instructionNames:[], instruction:'triage.md', markdown:'', instructionDirty:false,
       proposal:null, approved:[], projectEdit:null, logs:[], busy:false, loaded:false};
     this.refreshVersion = 0; this.detailVersion = 0; this.toastId = 0;
   }
@@ -102,7 +102,9 @@ class App extends Component {
     };
     document.addEventListener('keydown', this.keydown);
     this.refresh().catch(e => this.toast(e.message));
-    Api.request('/config').then(config => this.setState({backend:config.drawdown.backend})).catch(e => this.toast(e.message));
+    Api.request('/config').then(config => this.setState(s => ({config, backend:config.drawdown.backend,
+      picks:{plan:{model:'', ...s.picks.plan, backend:s.picks.plan?.backend || config.drawdown.backend},
+             execute:{model:'', ...s.picks.execute, backend:s.picks.execute?.backend || config.drawdown.backend}}}))).catch(e => this.toast(e.message));
     this.stream = new EventSource('/api/stream');
     this.stream.onopen = () => { this.setState({connected:true}); this.scheduleRefresh(); };
     this.stream.onerror = () => this.setState({connected:false});
@@ -173,7 +175,65 @@ class App extends Component {
   }
   filter(key, value) {this.setState(s => ({filters:{...s.filters,[key]:value}}), () => this.scheduleRefresh());}
   async move(id, status) {await this.act(() => Api.request(`/tasks/${id}/move`, 'POST', {status}));}
-  async run(id, flow) {await this.act(() => Api.request(`/tasks/${id}/run`, 'POST', {flow,backend:this.state.backend}));}
+  static loadPicks() {
+    try { return JSON.parse(localStorage.getItem('jot-picks')) || {plan:{}, execute:{}}; } catch { return {plan:{}, execute:{}}; }
+  }
+  pick(kind) {const p = this.state.picks[kind] || {}; return {backend:p.backend || this.state.backend, model:(p.model || '').trim() || null};}
+  setPick(kind, change) {
+    this.setState(s => {
+      const picks = {...s.picks, [kind]:{...s.picks[kind], ...change}};
+      try { localStorage.setItem('jot-picks', JSON.stringify(picks)); } catch { /* storage unavailable */ }
+      return {picks};
+    });
+  }
+  async run(id, flow) {
+    const choice = this.pick(flow === 'direct' ? 'execute' : 'plan');
+    if (await this.act(() => Api.request(`/tasks/${id}/run`, 'POST', {flow, ...choice}))) this.toast(`#${id}: ${flow === 'direct' ? 'running' : 'planning'} with ${choice.backend}/${choice.model || 'default'}`);
+  }
+  async approve(id, note) {
+    const choice = this.pick('execute');
+    if (await this.act(() => Api.request(`/tasks/${id}/approve`, 'POST', {note:note || null, ...choice}))) this.toast(`#${id}: approved, executing with ${choice.backend}/${choice.model || 'default'}`);
+  }
+  async sendBack(id) {
+    const comment = prompt('What needs to change?');
+    if (comment) await this.act(() => Api.request(`/tasks/${id}/send-back`, 'POST', {comment}));
+  }
+  async toggleExpand(id) {
+    if (this.state.expanded[id]) { this.setState(s => { const expanded = {...s.expanded}; delete expanded[id]; return {expanded}; }); return; }
+    try { const detail = await Api.request(`/tasks/${id}`); this.setState(s => ({expanded:{...s.expanded, [id]:detail}})); }
+    catch (error) { this.toast(error.message); }
+  }
+  renderPicker(kind, label) {
+    const backend = this.pick(kind).backend, model = this.state.picks[kind]?.model || '';
+    const fallback = this.state.config?.model_defaults?.[backend]?.[kind];
+    return html`<span class="picker"><small>${label}</small><select aria-label=${label + ' backend'} value=${backend} onChange=${e => this.setPick(kind, {backend:e.target.value, model:''})}>${options(backends)}</select><input class="model-input" aria-label=${label + ' model'} list=${'models-' + backend} value=${model} placeholder=${fallback ? 'default (' + fallback + ')' : 'provider default'} onInput=${e => this.setPick(kind, {model:e.target.value})}/></span>`;
+  }
+  renderDatalists() {
+    const suggestions = this.state.config?.model_suggestions || {};
+    return backends.map(b => html`<datalist id=${'models-' + b}>${(suggestions[b] || []).map(m => html`<option value=${m}/>`)}</datalist>`);
+  }
+  rowActions(t) {
+    const active = this.state.runs.find(r => r.task_id === t.id && !r.ended_at);
+    if (t.status === 'ready') return html`<button onClick=${() => this.run(t.id,'planned')}>Plan</button><button onClick=${() => this.run(t.id,'direct')}>Run now</button>`;
+    if (t.status === 'awaiting_approval') return html`<button class="primary" onClick=${() => this.approve(t.id)}>Approve</button><button onClick=${() => this.sendBack(t.id)}>Send back</button>`;
+    if (['planning','executing'].includes(t.status)) return active ? html`<button onClick=${() => this.act(() => Api.request(`/runs/${active.id}/cancel`,'POST'))}>Cancel</button>` : html`<span class="pill">running…</span>`;
+    if (t.status === 'review') return html`<button class="primary" onClick=${() => this.move(t.id,'done')}>Done</button><button onClick=${() => this.sendBack(t.id)}>Send back</button>`;
+    if (t.status === 'inbox') return html`<button onClick=${() => this.move(t.id,'ready')}>Mark ready</button>`;
+    return null;
+  }
+  renderExpanded(t, d) {
+    const latest = kind => [...d.events].reverse().find(e => e.kind === kind);
+    const plan = latest('plan'), result = latest('result');
+    const planIndex = plan ? d.events.indexOf(plan) : -1;
+    const questions = d.events.filter((e, i) => e.kind === 'question' && i >= planIndex);
+    return html`<tr class="expanded-row"><td></td><td colspan="6"><div class="expanded">
+      ${t.description && html`<details><summary>Description</summary><pre>${t.description}</pre></details>`}
+      ${plan ? html`<h4>Latest plan</h4><pre>${plan.body.text}</pre>` : html`<p class="muted">No plan yet.</p>`}
+      ${questions.length > 0 && html`<h4>Open questions</h4><ul>${questions.map(q => html`<li>${q.body.text}</li>`)}</ul>`}
+      ${result && html`<h4>Latest result</h4><pre>${result.body.text}</pre>${result.body.branch && html`<small>Branch: ${result.body.branch}</small>`}`}
+      ${t.status === 'awaiting_approval' && html`<form class="toolbar" onSubmit=${e => {e.preventDefault(); this.approve(t.id, formValues(e).note);}}><input name="note" placeholder="Answers / approval note (optional)"/><button class="primary">Approve</button></form>`}
+    </div></td></tr>`;
+  }
   async bulk(action, value) {
     const ids = [...this.state.selected];
     for (const id of ids) {
@@ -226,17 +286,21 @@ class App extends Component {
     })}</div>`;
   }
   renderList() {
-    const {tasks,selected,backend} = this.state;
-    return html`<div class="panel"><div class="toolbar"><strong>${selected.length} selected</strong>
-      <select aria-label="Bulk backend" value=${backend} onChange=${e => this.setState({backend:e.target.value})}>${options(backends)}</select>
+    const {selected,preset,expanded} = this.state;
+    const presets = {open:['Open', t => !['done','archived','wont_do'].includes(t.status)], attention:['Needs attention', t => ['awaiting_approval','review'].includes(t.status)],
+      ready:['Ready', t => t.status === 'ready'], progress:['In progress', t => ['planning','executing'].includes(t.status)], all:['All', () => true]};
+    const tasks = this.state.tasks.filter(presets[preset][1]);
+    return html`<div class="panel"><div class="toolbar">${this.renderPicker('plan','Plan with')}${this.renderPicker('execute','Execute with')}</div>
+      <div class="toolbar presets">${Object.entries(presets).map(([key,[label,test]]) => html`<button class=${preset === key ? 'active' : ''} onClick=${() => this.setState({preset:key})}>${label} <small>${this.state.tasks.filter(test).length}</small></button>`)}</div>
+      <div class="toolbar"><strong>${selected.length} selected</strong>
       <button disabled=${!selected.length} onClick=${() => this.bulk('run','planned')}>Plan</button><button disabled=${!selected.length} onClick=${() => this.bulk('run','direct')}>Run now</button>
       <select aria-label="Bulk move status" value="" disabled=${!selected.length} onChange=${e => {this.bulk('move',e.target.value); e.target.value='';}}><option value="">Move status…</option>${options(statuses)}</select></div>
-      <div class="table-scroll"><table><thead><tr><th><input type="checkbox" aria-label="Select all tasks" checked=${tasks.length > 0 && selected.length === tasks.length} onChange=${e => this.setState({selected:e.target.checked ? tasks.map(t => t.id) : []})}/></th><th>Task</th><th>Project</th><th>Status</th><th>Criticality</th><th>Type</th><th>Updated</th></tr></thead>
-      <tbody>${tasks.map(t => html`<tr><td><input type="checkbox" aria-label=${'Select task ' + t.id} checked=${selected.includes(t.id)} onChange=${() => this.toggleSelect(t.id)}/></td><td><button class="text-button" onClick=${() => this.openTask(t.id)}>${t.title}</button><div class="chips">${t.labels.map(l => pill(l))}${t.needs_enrichment && html`<small>enriching…</small>`}</div></td><td>${this.state.projects.find(p => p.id === t.project_id)?.name || '—'}</td><td>${pill(t.status)}</td><td>${pill(t.criticality)}</td><td>${human(t.type)}</td><td>${date(t.updated_at)}</td></tr>`)}</tbody></table></div>
+      <div class="table-scroll"><table><thead><tr><th><input type="checkbox" aria-label="Select all tasks" checked=${tasks.length > 0 && tasks.every(t => selected.includes(t.id))} onChange=${e => this.setState({selected:e.target.checked ? tasks.map(t => t.id) : []})}/></th><th>Task</th><th>Project</th><th>Status</th><th>Criticality</th><th>Actions</th><th>Updated</th></tr></thead>
+      <tbody>${tasks.map(t => html`<tr><td><input type="checkbox" aria-label=${'Select task ' + t.id} checked=${selected.includes(t.id)} onChange=${() => this.toggleSelect(t.id)}/></td><td><button class="caret" aria-label=${(expanded[t.id] ? 'Collapse' : 'Expand') + ' task ' + t.id} onClick=${() => this.toggleExpand(t.id)}>${expanded[t.id] ? '▾' : '▸'}</button><button class="text-button" onClick=${() => this.openTask(t.id)}>${t.title}</button><div class="chips">${t.labels.map(l => pill(l))}${t.needs_enrichment && t.status === 'inbox' && html`<small>enriching…</small>`}</div></td><td>${this.state.projects.find(p => p.id === t.project_id)?.name || '—'}</td><td>${pill(t.status)}</td><td>${pill(t.criticality)}</td><td><div class="row-actions">${this.rowActions(t)}</div></td><td>${date(t.updated_at)}</td></tr>${expanded[t.id] && this.renderExpanded(t, expanded[t.id])}`)}</tbody></table></div>
       ${!tasks.length && html`<p class="empty">No tasks match these filters.</p>`}</div>`;
   }
   renderRuns(runs = this.state.runs) {
-    return html`<div class="runs">${runs.length ? [...runs].reverse().map(r => html`<article class="panel run"><div class="toolbar"><button class="text-button" onClick=${() => this.openTask(r.task_id)}>Run #${r.id} · task #${r.task_id}</button>${pill(r.status)}${pill(r.backend)}${pill(r.phase)}</div><small>${date(r.started_at)}</small><pre>${r.summary || 'Waiting for output…'}</pre>${r.branch && html`<small>Branch: ${r.branch}</small>`}
+    return html`<div class="runs">${runs.length ? [...runs].reverse().map(r => html`<article class="panel run"><div class="toolbar"><button class="text-button" onClick=${() => this.openTask(r.task_id)}>Run #${r.id} · task #${r.task_id}</button>${pill(r.status)}${pill(r.backend)}${r.model && html`<span class="pill">${r.model}</span>`}${pill(r.phase)}</div><small>${date(r.started_at)}</small><pre>${r.summary || 'Waiting for output…'}</pre>${r.branch && html`<small>Branch: ${r.branch}</small>`}
       ${!r.ended_at && html`<button onClick=${() => this.act(() => Api.request(`/runs/${r.id}/cancel`,'POST'))}>Cancel run</button>`}
       ${this.state.logs.filter(l => l.run_id === r.id).map(l => html`<pre class=${'log ' + l.kind}>[${l.kind}] ${l.text}</pre>`)}</article>`) : html`<p class="empty">No runs yet. Open a ready task to plan or run it.</p>`}</div>`;
   }
@@ -271,10 +335,10 @@ class App extends Component {
       <header class="drawer-header"><strong>Task #${t.id}</strong>${pill(t.status)}<button class="drawer-close" aria-label="Close task" onClick=${() => this.closeDetail()}>✕</button></header>
       <div class="drawer-body"><div class="chips">${pill(t.criticality)}${pill(t.type)}${t.labels.map(l => pill(l))}</div>
       <${TaskEditor} key=${t.id} task=${t} projects=${this.state.projects} app=${this}/>
-      <section class="actions"><h2>Draw down</h2><div class="toolbar"><select aria-label="Agent backend" value=${this.state.backend} onChange=${e => this.setState({backend:e.target.value})}>${options(backends)}</select><button onClick=${() => this.run(t.id,'planned')}>Plan first</button><button onClick=${() => this.run(t.id,'direct')}>Run now (direct)</button></div>
-      <form onSubmit=${e => {e.preventDefault(); const {note} = formValues(e); this.act(() => Api.request(`/tasks/${t.id}/approve`,'POST',{note,backend:this.state.backend}));}}><label>Approval note<input name="note" placeholder="Optional approval note"/></label><button class="primary">Approve</button></form>
+      <section class="actions"><h2>Draw down</h2><div class="toolbar">${this.renderPicker('plan','Plan with')}${this.renderPicker('execute','Execute with')}</div><div class="toolbar"><button onClick=${() => this.run(t.id,'planned')}>Plan first</button><button onClick=${() => this.run(t.id,'direct')}>Run now (direct)</button></div>
+      <form onSubmit=${e => {e.preventDefault(); const {note} = formValues(e); this.approve(t.id, note);}}><label>Approval note<input name="note" placeholder="Optional approval note"/></label><button class="primary">Approve</button></form>
       <form onSubmit=${e => {e.preventDefault(); const body = formValues(e); this.act(() => Api.request(`/tasks/${t.id}/send-back`,'POST',body));}}><label>Send-back feedback<input name="comment" required placeholder="What needs to change?"/></label><button>Send back</button></form>
-      <div class="toolbar"><button onClick=${() => this.act(() => Api.request(`/tasks/${t.id}/enrich`,'POST',{backend:this.state.backend}))}>Re-enrich</button><select aria-label="Move task status" value="" onChange=${e => this.move(t.id,e.target.value)}><option value="">Move status…</option>${options(d.transitions)}</select><button class="danger" onClick=${async () => {if (confirm('Delete this task? Its history will be retained.')) {this.closeDetail(); await this.act(() => Api.request(`/tasks/${t.id}`,'DELETE'));}}}>Delete</button></div></section>
+      <div class="toolbar"><button onClick=${() => this.act(() => Api.request(`/tasks/${t.id}/enrich`,'POST',{}))}>Re-enrich</button><select aria-label="Move task status" value="" onChange=${e => this.move(t.id,e.target.value)}><option value="">Move status…</option>${options(d.transitions)}</select><button class="danger" onClick=${async () => {if (confirm('Delete this task? Its history will be retained.')) {this.closeDetail(); await this.act(() => Api.request(`/tasks/${t.id}`,'DELETE'));}}}>Delete</button></div></section>
       <h2>Runs & live output</h2>${this.renderRuns(d.runs)}<h2>Timeline</h2>
       <form onSubmit=${async e => {e.preventDefault(); const form=e.currentTarget, body=formValues(e); if (await this.act(() => Api.request(`/tasks/${t.id}/comment`,'POST',body))) form.reset();}}><label>Add a comment<textarea name="comment" required rows="2" placeholder="Answer a question or add context…"/></label><button>Post comment</button></form>
       <ol class="timeline">${[...d.events].reverse().map(event => html`<li><div class="toolbar">${pill(event.kind)}<small>${event.actor} · ${date(event.ts)}</small></div><pre>${Object.entries(event.body).map(([k,v]) => ['text','content','markdown'].includes(k) ? String(v) : `${human(k)}: ${v}`).join('\n')}</pre></li>`)}</ol>
@@ -283,7 +347,7 @@ class App extends Component {
   render() {
     const {view,connected,busy,loaded} = this.state;
     return html`<header class="topbar"><a class="brand" href="/" aria-label="Jot home"><span>j</span>jot<span class="brand-dot">.</span></a><form class="capture" onSubmit=${e => this.capture(e)}><span>＋</span><input id="capture" aria-label="Capture a task" placeholder="What's on your mind? Capture an idea…" autoComplete="off"/><kbd>Ctrl K</kbd><button class="primary" disabled=${busy}>${busy ? 'Saving…' : 'Capture'}</button></form><button class="theme" aria-label="Toggle light and dark theme" onClick=${() => this.theme()}>◐</button></header>
-      <div class="layout"><nav aria-label="Main views"><small>WORKSPACE</small>${['Board','List','Runs','Projects','Instructions','Cleanup'].map((name,i) => html`<button class=${view === name ? 'active' : ''} onClick=${() => this.chooseView(name)}><span>${['▦','☷','▷','◇','≡','↺'][i]}</span>${name}</button>`)}<div class="connection"><span class=${connected ? 'online' : ''}></span>${connected ? 'Live updates' : 'Reconnecting…'}<small>Local space. Clear head.</small></div></nav>
+      ${this.renderDatalists()}<div class="layout"><nav aria-label="Main views"><small>WORKSPACE</small>${['Board','List','Runs','Projects','Instructions','Cleanup'].map((name,i) => html`<button class=${view === name ? 'active' : ''} onClick=${() => this.chooseView(name)}><span>${['▦','☷','▷','◇','≡','↺'][i]}</span>${name}</button>`)}<div class="connection"><span class=${connected ? 'online' : ''}></span>${connected ? 'Live updates' : 'Reconnecting…'}<small>Local space. Clear head.</small></div></nav>
       <main><div class="page-heading"><div><p class="eyebrow">MAKE ROOM FOR IDEAS</p><h1>${view}</h1></div><span class="muted">${this.state.tasks.length} tasks in view</span></div>
       ${['Board','List'].includes(view) && this.renderFilters()}
       ${!loaded ? html`<p class="empty">Loading your workspace…</p>` : view === 'Board' ? this.renderBoard() : view === 'List' ? this.renderList() : view === 'Runs' ? this.renderRuns() : view === 'Projects' ? this.renderProjects() : view === 'Instructions' ? this.renderInstructions() : this.renderCleanup()}

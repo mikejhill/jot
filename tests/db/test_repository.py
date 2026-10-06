@@ -7,6 +7,7 @@ from datetime import timedelta
 import pytest
 from pydantic import ValidationError
 
+from jot.config import JotHome
 from jot.core.models import Clock, Criticality, EventKind, Project, Run, Status, Task
 from jot.db.connection import Database
 from jot.db.migrations import Migrations
@@ -41,12 +42,12 @@ class TestRepositories:
             "cleanup_proposals",
             "tasks_fts",
         } <= tables
-        assert db.connection.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert db.connection.execute("PRAGMA user_version").fetchone()[0] == 2
         assert db.connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         assert db.connection.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
         assert db.connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
         Migrations.apply(db.connection)
-        db.connection.execute("PRAGMA user_version=2")
+        db.connection.execute("PRAGMA user_version=3")
         with pytest.raises(RepositoryError, match="newer"):
             Migrations.apply(db.connection)
 
@@ -227,3 +228,20 @@ class TestRepositories:
         with db.write():
             TaskRepository(db).create(Task(title="also rolled back"))
             raise ValueError("abort")
+
+
+class TestMigrations:
+    """Upgrades from older schema versions."""
+
+    def test_upgrade_adds_run_model(self, home: JotHome) -> None:
+        """A version-1 database gains runs.model on open."""
+        with Database.open(home.database) as database:
+            database.connection.execute("ALTER TABLE runs DROP COLUMN model")
+            database.connection.execute("PRAGMA user_version=1")
+        with Database.open(home.database) as database:
+            columns = {
+                row[1] for row in database.connection.execute("PRAGMA table_info(runs)")
+            }
+            version = database.connection.execute("PRAGMA user_version").fetchone()[0]
+        assert "model" in columns
+        assert version == 2

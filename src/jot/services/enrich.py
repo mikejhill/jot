@@ -142,7 +142,9 @@ class EnrichService:
         self.workflow = Workflow(db, config.drawdown.default_flow)
         self.instructions = InstructionStore(home)
 
-    async def enrich(self, task_id: int, backend: str | None = None) -> Task:
+    async def enrich(
+        self, task_id: int, backend: str | None = None, model: str | None = None
+    ) -> Task:
         """Enrich one task and return it (status inbox->ready when confident).
 
         Raises:
@@ -150,10 +152,11 @@ class EnrichService:
         """
         task = self.tasks.get(task_id)
         name = backend or self.config.triage.backend
-        agent = BackendRegistry.create(name, self.config.triage.model)
+        resolved = self.config.model_for(name, "triage", model)
+        agent = BackendRegistry.create(name, resolved)
         data = await agent.structured(SYSTEM, self._prompt(task), TRIAGE_SCHEMA)
         triage = Triage.parse(data, task.title)
-        result = self._apply(task, triage, name)
+        result = self._apply(task, triage, name, resolved or "default")
         self._publish(task_id)
         return result
 
@@ -222,7 +225,7 @@ class EnrichService:
         ).fetchall()
         return [str(row[0]) for row in rows]
 
-    def _apply(self, task: Task, triage: Triage, backend: str) -> Task:
+    def _apply(self, task: Task, triage: Triage, backend: str, model: str) -> Task:
         """Persist triage output, add labels/questions, and promote when confident."""
         project_id = task.project_id or self._project_id(triage)
         changes: dict[str, object] = {
@@ -247,7 +250,11 @@ class EnrichService:
             self.tasks.audit(
                 task.id,
                 EventKind.ENRICHED,
-                {"backend": backend, "confidence": triage.confidence},
+                {
+                    "backend": backend,
+                    "model": model,
+                    "confidence": triage.confidence,
+                },
                 actor=ACTOR,
             )
         current = self.tasks.get(task.id)

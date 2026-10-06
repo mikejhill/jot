@@ -88,14 +88,21 @@ class CleanupService:
         self.workflow = Workflow(db, config.drawdown.default_flow)
         self.instructions = InstructionStore(home)
 
-    async def scan(self, *, use_agent: bool = False) -> int:
+    async def scan(
+        self,
+        *,
+        use_agent: bool = False,
+        backend: str | None = None,
+        model: str | None = None,
+    ) -> int:
         """Create a proposal from heuristics and an optional agent pass."""
         tasks = [t for t in self.tasks.list() if t.claimed_by is None]
         found: dict[int, tuple[Action, str]] = {}
         for task_id, action, reason in self._heuristics(tasks):
             found.setdefault(task_id, (action, reason))
         if use_agent:
-            for task_id, action, reason in await self._agent(tasks, found):
+            agent_items = await self._agent(tasks, found, backend, model)
+            for task_id, action, reason in agent_items:
                 found[task_id] = (action, reason)
         titles = {t.id: t.title for t in tasks}
         items = [
@@ -251,7 +258,11 @@ class CleanupService:
         return found
 
     async def _agent(
-        self, tasks: list[Task], found: dict[int, tuple[Action, str]]
+        self,
+        tasks: list[Task],
+        found: dict[int, tuple[Action, str]],
+        backend: str | None,
+        model: str | None,
     ) -> list[tuple[int, Action, str]]:
         """Ask the triage backend to review candidates using cleanup.md."""
         now = Clock.now()
@@ -268,8 +279,9 @@ class CleanupService:
             "heuristic items you agree with, drop ones you don't (omit them), and add "
             "others you find. Every item needs a specific reason."
         )
+        name = backend or self.config.triage.backend
         agent = BackendRegistry.create(
-            self.config.triage.backend, self.config.triage.model
+            name, self.config.model_for(name, "cleanup", model)
         )
         try:
             data = await agent.structured(

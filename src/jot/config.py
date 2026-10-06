@@ -13,6 +13,9 @@ from pydantic import Field, TypeAdapter, ValidationError
 from jot.core.models import Flow
 from jot.exceptions import ConfigurationError
 
+DEFAULT_MODEL = "default"
+ACTIONS = ("triage", "plan", "execute", "cleanup")
+
 DEFAULT_CONFIG = """[triage]
 backend = "claude"
 model = "default"
@@ -28,6 +31,26 @@ isolation = "worktree"
 [server]
 host = "127.0.0.1"
 port = 8765
+
+# Default model per backend and action; "default" = the provider's own default.
+# Override per run with --model (CLI) or the model picker (UI).
+[models.claude]
+triage = "default"
+plan = "default"
+execute = "default"
+cleanup = "default"
+
+[models.codex]
+triage = "default"
+plan = "default"
+execute = "default"
+cleanup = "default"
+
+[models.copilot]
+triage = "default"
+plan = "default"
+execute = "default"
+cleanup = "default"
 
 [cleanup]
 inbox_days = 30
@@ -132,6 +155,16 @@ class CleanupConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class ActionModels:
+    """Default model per action for one backend ("default" = provider default)."""
+
+    triage: str = DEFAULT_MODEL
+    plan: str = DEFAULT_MODEL
+    execute: str = DEFAULT_MODEL
+    cleanup: str = DEFAULT_MODEL
+
+
+@dataclass(frozen=True, slots=True)
 class Config:
     """Validated settings for the data home."""
 
@@ -140,6 +173,28 @@ class Config:
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
     cleanup: CleanupConfig = field(default_factory=CleanupConfig)
+    models: dict[str, ActionModels] = field(default_factory=dict)
+
+    def model_for(
+        self, backend: str, action: str, override: str | None = None
+    ) -> str | None:
+        """Resolve a model: explicit override, then config, then provider default.
+
+        Returns None when the provider's own default should be used.
+        """
+        chosen = (override or "").strip()
+        if not chosen:
+            models = self.models.get(backend, ActionModels())
+            by_action = {
+                "triage": models.triage,
+                "plan": models.plan,
+                "execute": models.execute,
+                "cleanup": models.cleanup,
+            }
+            chosen = by_action.get(action, DEFAULT_MODEL)
+            if action == "triage" and chosen == DEFAULT_MODEL:
+                chosen = self.triage.model  # legacy [triage] model setting
+        return None if chosen in ("", DEFAULT_MODEL) else chosen
 
 
 @dataclass(frozen=True, slots=True)

@@ -49,3 +49,22 @@ class TestJotHome:
         (home.path / "config.toml").write_text(content, encoding="utf-8")
         with pytest.raises(ConfigurationError, match="Cannot load"):
             home.initialize()
+
+
+class TestModelResolution:
+    """Config.model_for precedence."""
+
+    def test_precedence(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Override > models.<backend>.<action> > legacy triage model > default."""
+        monkeypatch.setenv("JOT_HOME", str(tmp_path))
+        (tmp_path / "config.toml").write_text(
+            '[triage]\nmodel = "haiku"\n[models.claude]\nplan = "opus"\n',
+            encoding="utf-8",
+        )
+        config = JotHome.resolve().initialize()
+        assert config.model_for("claude", "plan") == "opus"
+        assert config.model_for("claude", "plan", "sonnet") == "sonnet"
+        assert config.model_for("claude", "execute") is None
+        assert config.model_for("claude", "triage") == "haiku"
+        assert config.model_for("codex", "plan", " ") is None
+        assert config.model_for("codex", "unknown") is None

@@ -160,6 +160,7 @@ class Run(Record):
     id: int = 0
     task_id: int
     backend: str
+    model: str | None = None
     phase: str = Field(pattern="^(plan|execute)$")
     status: str = "pending"
     session_id: str | None = None
