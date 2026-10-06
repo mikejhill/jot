@@ -265,6 +265,30 @@ class RunService:
         task = self.tasks.get(task_id)
         if task.status is not Status.NEEDS_INPUT:
             raise WorkflowError(f"Task {task_id} is {task.status}, not needs_input")
+        events = self._record_answers(task_id, answers)
+        resume = Questions.resume_status(events)
+        phase = AgentMode.EXECUTE if resume is Status.EXECUTING else AgentMode.PLAN
+        return await self._launch(
+            task, phase, backend, self.workflow.flow_for(task), model
+        )
+
+    def save_answers(self, task_id: int, answers: dict[int, str]) -> int:
+        """Record answers without starting a run (task in any status).
+
+        The agent sees them in the task history the next time it plans or runs.
+        Returns the number of non-blank answers saved.
+        """
+        self.tasks.get(task_id)
+        self._record_answers(task_id, answers)
+        self._publish_task(task_id)
+        return sum(1 for text in answers.values() if text.strip())
+
+    def _record_answers(self, task_id: int, answers: dict[int, str]) -> list[TaskEvent]:
+        """Validate ids against the open questions and append answer events.
+
+        Raises:
+            WorkflowError: An id is not one of the task's latest questions.
+        """
         events = self.tasks.events.for_task(task_id)
         questions = {q.id: q for q in Questions.latest(events)}
         unknown = sorted(set(answers) - set(questions))
@@ -286,11 +310,7 @@ class RunService:
                         },
                         actor="owner",
                     )
-        resume = Questions.resume_status(events)
-        phase = AgentMode.EXECUTE if resume is Status.EXECUTING else AgentMode.PLAN
-        return await self._launch(
-            task, phase, backend, self.workflow.flow_for(task), model
-        )
+        return events
 
     async def cancel(self, run_id: int) -> None:
         """Stop a running run; its task lease is released by the run itself.

@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Annotated
 import typer
 
 from jot.agents.registry import BackendRegistry
-from jot.core.models import Flow, Run
+from jot.core.models import Flow, Run, Status
 from jot.db.repository import RunRepository, TaskRepository
 from jot.exceptions import WorkflowError
 from jot.services.bus import EventBus, Topic
@@ -219,13 +219,29 @@ class AgentCommands:
         model: ModelOption = None,
         json: JsonFlag = False,
     ) -> None:
-        """Answer a needs_input task's questions and resume its run."""
+        """Answer a task's questions.
+
+        A needs_input task resumes its run; any other task just saves the
+        answers for the agent's next run.
+        """
         answers: dict[int, str] = {}
         for item in answer or []:
             key, sep, text = item.partition("=")
             if not sep or not key.strip().isdigit():
                 raise WorkflowError(f"--answer must be <event-id>=<text>, got {item!r}")
             answers[int(key)] = text
+        with self.cli.session(json=json) as (db, _, home):
+            status = TaskRepository(db).get(task_id).status
+            if status is not Status.NEEDS_INPUT:
+                saved = RunService(
+                    db, home, home.initialize(), EventBus()
+                ).save_answers(task_id, answers)
+                self.cli.emit(
+                    {"saved": saved},
+                    f"Saved {saved} answer(s); the agent sees them on its next run\n",
+                    json=json,
+                )
+                return
         self._drive(
             lambda service: service.respond(task_id, answers, backend, model),
             json=json,

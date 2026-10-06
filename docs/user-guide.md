@@ -58,7 +58,18 @@ jot send-back 12 "use the existing retry helper"   # -> ready, feedback kept for
 jot runs 12; jot log <run-id>
 ```
 
-**Questions from the agent.** Plan and execute runs can return structured questions (`{"id", "text", "choices"?}`). The task then moves to `needs_input`, and the run's lease is released. Each question appears in the UI with its own input: radio buttons when the agent suggested choices, otherwise a text box. Answers are optional. Submitting resumes the same phase. Blank answers leave the decision to the agent. You can also send the task back to `ready` instead of answering.
+**Answering questions.** Agents and triage can ask you questions. They show up in three places:
+
+- **Task panel:** a highlighted **Questions for you** box at the top, with one answer field per question (radio buttons when the agent suggested choices).
+- **List:** a **? N questions** badge on the row. Click it to expand the row and answer inline.
+- **Board:** the same badge on the card.
+
+What the button does depends on the task's status:
+
+- **Waiting on you** (`needs_input`, a run paused to ask): **Send answers and continue** saves your answers and resumes that run (plan or execute). Blank answers leave the decision to the agent.
+- **Any other status:** **Save answers** records them without starting anything. The agent reads them in the task history the next time it plans or runs.
+
+The **Needs attention** preset in the List includes every task with unanswered questions. From the CLI: `jot show <id> --json` lists the question event IDs, and `jot answer <id> -a <question-id>="text"` saves answers (and resumes the run if the task is waiting on input).
 
 **Choosing models.** Every action can use a different model. Set defaults per backend and action in `config.toml`:
 

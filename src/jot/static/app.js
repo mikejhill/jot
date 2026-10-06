@@ -234,6 +234,18 @@ class App extends Component {
     const choice = this.pick(phase);
     if (await this.act(() => Api.request(`/tasks/${t.id}/answers`, 'POST', {answers, ...choice}))) this.toast(`#${t.id}: answers sent, ${phase === 'execute' ? 'executing' : 'planning'} with ${choice.backend}/${choice.model || 'default'}`);
   }
+  async saveAnswers(event, t, d) {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    const value = name => String(data.get(name) || '').trim();
+    const answers = d.questions.map(q => ({question_id:q.id, text:value(`q${q.id}-other`) || value(`q${q.id}`)})).filter(a => a.text);
+    if (!answers.length) { this.toast('Type an answer first'); return; }
+    if (await this.act(() => Api.request(`/tasks/${t.id}/answers/save`, 'POST', {answers}))) {
+      this.toast(`#${t.id}: ${answers.length} answer(s) saved; the agent sees them on its next run`);
+      if (this.state.detail?.task.id === t.id) await this.openTask(t.id, false, false);
+      if (this.state.expanded[t.id]) { const detail = await Api.request(`/tasks/${t.id}`); this.setState(s => ({expanded:{...s.expanded, [t.id]:detail}})); }
+    }
+  }
   async sendBack(id) {
     const comment = prompt('What needs to change?');
     if (comment) await this.act(() => Api.request(`/tasks/${id}/send-back`, 'POST', {comment}));
@@ -325,26 +337,27 @@ class App extends Component {
   renderQuestions(t, d) {
     const questions = d.questions || [];
     if (!questions.length) return null;
-    if (t.status !== 'needs_input') {
-      return html`<h4>Questions</h4><ol class="questions">${questions.map(q => html`<li>${markdown(q.text)}${q.answer ? html`<p class="answer"><strong>Answer:</strong> ${q.answer}</p>` : html`<small>No answer</small>`}</li>`)}</ol>`;
-    }
+    const waiting = t.status === 'needs_input';
+    const open = questions.filter(q => !q.answer).length;
     const phase = d.resume_phase === 'execute' ? 'execution' : 'planning';
-    return html`<form class="question-form" onSubmit=${e => this.answer(e, t, d)}>
-      <h4>The agent needs your input</h4>
-      <p class="muted">Answer what you can. Blank answers leave it to the agent's judgement. Your answers go back to the agent, which continues ${phase}.</p>
-      ${questions.map((q, i) => html`<fieldset class="question" key=${q.id}>
+    return html`<form class=${'question-form' + (waiting ? ' waiting' : '')} onSubmit=${e => waiting ? this.answer(e, t, d) : this.saveAnswers(e, t, d)}>
+      <h4>${waiting ? 'The agent needs your input' : 'Questions for you'} <span class="pill">${open ? `${open} unanswered` : 'all answered'}</span></h4>
+      <p class="muted">${waiting
+        ? `Answer what you can. Blank answers leave it to the agent's judgement. Sending resumes ${phase}.`
+        : 'Type an answer under any question and save. Nothing runs now; the agent reads your answers the next time it plans or runs this task.'}</p>
+      ${questions.map((q, i) => html`<fieldset class=${'question' + (q.answer ? ' answered' : '')} key=${q.id}>
         <div class="question-text"><span class="question-number">${i + 1}</span>${markdown(q.text)}</div>
         ${q.choices.length > 0 ? html`<div class="choices" role="radiogroup" aria-label=${'Choices for question ' + (i + 1)}>${q.choices.map(c => html`<label class="choice"><input type="radio" name=${'q' + q.id} value=${c} defaultChecked=${q.answer === c}/><span>${c}</span></label>`)}</div>
           <input name=${'q' + q.id + '-other'} aria-label=${'Other answer to question ' + (i + 1)} placeholder="Or write your own answer" defaultValue=${q.answer && !q.choices.includes(q.answer) ? q.answer : ''}/>`
-        : html`<textarea name=${'q' + q.id} rows="2" aria-label=${'Answer to question ' + (i + 1)} placeholder="Your answer (optional)" defaultValue=${q.answer || ''}/>`}
+        : html`<textarea name=${'q' + q.id} rows="2" aria-label=${'Answer to question ' + (i + 1)} placeholder="Your answer" defaultValue=${q.answer || ''}/>`}
       </fieldset>`)}
-      <button class="primary">Send answers and continue</button>
+      <button class="primary">${waiting ? 'Send answers and continue' : 'Save answers'}</button>
     </form>`;
   }
-  renderOutput(t, d) {
+  renderOutput(t, d, withQuestions = true) {
     const plan = latest(d.events, 'plan'), result = latest(d.events, 'result');
     return html`${plan ? html`<h4>Latest plan</h4>${markdown(plan.body.text, 'plan')}` : html`<p class="muted">No plan yet.</p>`}
-      ${this.renderQuestions(t, d)}
+      ${withQuestions && this.renderQuestions(t, d)}
       ${result && html`<h4>Latest result</h4>${markdown(result.body.text)}${result.body.branch && html`<small>Branch: ${result.body.branch}</small>`}`}`;
   }
   static eventSummary(event) {
@@ -448,7 +461,7 @@ class App extends Component {
       return html`<section class="column" onDragOver=${e => e.preventDefault()} onDrop=${e => {e.preventDefault(); const id = Number(e.dataTransfer.getData('text/plain')); if (id) this.move(id,status);}}>
         <h2><span class=${'dot ' + status}></span>${human(status)}<span class="count">${tasks.length}</span></h2>
         ${tasks.map(t => html`<button class="card" draggable=${!t.claimed_by} onDragStart=${e => e.dataTransfer.setData('text/plain',String(t.id))} onClick=${() => this.openTask(t.id)}>
-          <small>#${t.id} · ${this.state.projects.find(p => p.id === t.project_id)?.name || 'No project'}</small><strong>${t.title}</strong>
+          <small>#${t.id} · ${this.state.projects.find(p => p.id === t.project_id)?.name || 'No project'}</small><strong>${t.title}</strong>${t.open_questions > 0 && html`<span class="q-badge">? ${t.open_questions} question${t.open_questions > 1 ? 's' : ''}</span>`}
           ${t.needs_enrichment && t.status === "inbox" && html`<span class="enriching">inbox · enriching…</span>`}
           ${t.status === 'needs_input' && html`<span class="needs-input">Waiting for your answers</span>`}
           <div class="chips">${pill(t.criticality)}${pill(t.type)}${t.labels.map(label => pill(label))}</div>
@@ -458,7 +471,7 @@ class App extends Component {
   }
   renderList() {
     const {selected,preset,expanded} = this.state;
-    const presets = {open:['Open', t => !['done','archived','wont_do'].includes(t.status)], attention:['Needs attention', t => ['needs_input','awaiting_approval','review'].includes(t.status)],
+    const presets = {open:['Open', t => !['done','archived','wont_do'].includes(t.status)], attention:['Needs attention', t => ['needs_input','awaiting_approval','review'].includes(t.status) || t.open_questions > 0],
       input:['Needs input', t => t.status === 'needs_input'],
       ready:['Ready', t => t.status === 'ready'], progress:['In progress', t => ['planning','executing'].includes(t.status)], all:['All', () => true]};
     const tasks = this.state.tasks.filter(presets[preset][1]);
@@ -468,7 +481,7 @@ class App extends Component {
       <button disabled=${!selected.length} onClick=${() => this.bulk('run','planned')}>Plan</button><button disabled=${!selected.length} onClick=${() => this.bulk('run','direct')}>Run now</button>
       <select aria-label="Bulk move status" value="" disabled=${!selected.length} onChange=${e => {this.bulk('move',e.target.value); e.target.value='';}}><option value="">Move status…</option>${options(statuses)}</select></div>
       <div class="table-scroll"><table><thead><tr><th><input type="checkbox" aria-label="Select all tasks" checked=${tasks.length > 0 && tasks.every(t => selected.includes(t.id))} onChange=${e => this.setState({selected:e.target.checked ? tasks.map(t => t.id) : []})}/></th><th>Task</th><th>Project</th><th>Status</th><th>Criticality</th><th>Actions</th><th>Updated</th></tr></thead>
-      <tbody>${tasks.map(t => html`<tr><td><input type="checkbox" aria-label=${'Select task ' + t.id} checked=${selected.includes(t.id)} onChange=${() => this.toggleSelect(t.id)}/></td><td><button class="caret" aria-label=${(expanded[t.id] ? 'Collapse' : 'Expand') + ' task ' + t.id} onClick=${() => this.toggleExpand(t.id)}>${expanded[t.id] ? '▾' : '▸'}</button><button class="text-button" onClick=${() => this.openTask(t.id)}>${t.title}</button><div class="chips">${t.labels.map(l => pill(l))}${t.needs_enrichment && t.status === 'inbox' && html`<small>enriching…</small>`}</div></td><td>${this.state.projects.find(p => p.id === t.project_id)?.name || '—'}</td><td>${pill(t.status)}</td><td>${pill(t.criticality)}</td><td><div class="row-actions">${this.rowActions(t)}</div></td><td>${date(t.updated_at)}</td></tr>${expanded[t.id] && this.renderExpanded(t, expanded[t.id])}`)}</tbody></table></div>
+      <tbody>${tasks.map(t => html`<tr><td><input type="checkbox" aria-label=${'Select task ' + t.id} checked=${selected.includes(t.id)} onChange=${() => this.toggleSelect(t.id)}/></td><td><button class="caret" aria-label=${(expanded[t.id] ? 'Collapse' : 'Expand') + ' task ' + t.id} onClick=${() => this.toggleExpand(t.id)}>${expanded[t.id] ? '▾' : '▸'}</button><button class="text-button" onClick=${() => this.openTask(t.id)}>${t.title}</button><div class="chips">${t.labels.map(l => pill(l))}${t.needs_enrichment && t.status === 'inbox' && html`<small>enriching…</small>`}${t.open_questions > 0 && html`<button class="q-badge" title="Answer in the expanded row or the task panel" onClick=${() => this.state.expanded[t.id] || this.toggleExpand(t.id)}>? ${t.open_questions} question${t.open_questions > 1 ? 's' : ''}</button>`}</div></td><td>${this.state.projects.find(p => p.id === t.project_id)?.name || '—'}</td><td>${pill(t.status)}</td><td>${pill(t.criticality)}</td><td><div class="row-actions">${this.rowActions(t)}</div></td><td>${date(t.updated_at)}</td></tr>${expanded[t.id] && this.renderExpanded(t, expanded[t.id])}`)}</tbody></table></div>
       ${!tasks.length && html`<p class="empty">No tasks match these filters.</p>`}</div>`;
   }
   static loadoutSummary(raw) {
@@ -579,7 +592,8 @@ class App extends Component {
       <header class="drawer-header"><strong>Task #${t.id}</strong>${pill(t.status)}<button class="drawer-close" aria-label="Close task" onClick=${() => this.closeDetail()}>✕</button></header>
       <div class="drawer-body"><div class="chips">${pill(t.criticality)}${pill(t.type)}${t.labels.map(l => pill(l))}</div>
       <${TaskEditor} key=${t.id} task=${t} projects=${this.state.projects} app=${this}/>
-      <section class="output"><h2>Agent output</h2>${this.renderOutput(t, d)}</section>
+      ${(d.questions || []).length > 0 && html`<section class="questions-section" id="questions">${this.renderQuestions(t, d)}</section>`}
+      <section class="output"><h2>Agent output</h2>${this.renderOutput(t, d, false)}</section>
       <section class="actions"><h2>Draw down</h2><div class="toolbar">${this.renderPicker('plan','Plan with')}${this.renderPicker('execute','Execute with')}</div><div class="toolbar"><button onClick=${() => this.run(t.id,'planned')}>Plan first</button><button onClick=${() => this.run(t.id,'direct')}>Run now (direct)</button></div>
       <form onSubmit=${e => {e.preventDefault(); const {note} = formValues(e); this.approve(t.id, note);}}><label>Approval note<input name="note" placeholder="Optional approval note"/></label><button class="primary">Approve</button></form>
       <form onSubmit=${e => {e.preventDefault(); const body = formValues(e); this.act(() => Api.request(`/tasks/${t.id}/send-back`,'POST',body));}}><label>Send-back feedback<input name="comment" required placeholder="What needs to change?"/></label><button>Send back</button></form>

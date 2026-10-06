@@ -29,7 +29,9 @@ class TaskRoutes:
         self.router.add_api_route("/{task_id}/move", self.move, methods=["POST"])
         self.router.add_api_route("/{task_id}/comment", self.comment, methods=["POST"])
 
-    async def list_tasks(self, filters: Annotated[TaskFilters, Query()]) -> list[Task]:
+    async def list_tasks(
+        self, filters: Annotated[TaskFilters, Query()]
+    ) -> list[dict[str, object]]:
         """Filter before ranking and limiting so results remain globally ordered."""
         runtime = self._access.runtime
         values = filters.model_dump(exclude={"sort", "type", "status", "limit"})
@@ -45,7 +47,17 @@ class TaskRoutes:
         if filters.sort == "priority":
             priorities = {p.id: p.priority for p in runtime.projects.list()}
             tasks = Prioritizer(priorities).rank(tasks)
-        return tasks if filters.limit is None else tasks[: filters.limit]
+        tasks = tasks if filters.limit is None else tasks[: filters.limit]
+        return [
+            task.model_dump(mode="json")
+            | {"open_questions": self._open_questions(task.id)}
+            for task in tasks
+        ]
+
+    def _open_questions(self, task_id: int) -> int:
+        """Count the task's latest questions that have no answer yet."""
+        events = self._access.runtime.tasks.events.for_task(task_id)
+        return sum(1 for q in Questions.view(events) if not q["answer"])
 
     def _content(self, body: TaskFields) -> dict[str, object]:
         """Resolve project slugs and reject conflicting project identifiers."""

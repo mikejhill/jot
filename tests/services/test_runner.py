@@ -344,6 +344,27 @@ class ProcessCheck:
         return True
 
 
+class TestSaveAnswers:
+    """Answers can be saved in any status without starting a run."""
+
+    def test_save_answers_without_run(self, harness: Harness) -> None:
+        """Answers attach to open questions; unknown ids are rejected."""
+        task = harness.ready()
+        with harness.db.write():
+            question = harness.tasks.audit(
+                task.id, EventKind.QUESTION, {"text": "Which tone?"}, actor="agent"
+            )
+        assert harness.service.save_answers(task.id, {question.id: " Playful "}) == 1
+        events = harness.tasks.events.for_task(task.id)
+        answer = [e for e in events if e.kind is EventKind.ANSWER][-1]
+        assert answer.body["text"] == "Playful"
+        assert answer.body["question_id"] == question.id
+        assert harness.tasks.get(task.id).status is Status.READY
+        assert RunRepository(harness.db).list() == []
+        with pytest.raises(WorkflowError, match="Not open questions"):
+            harness.service.save_answers(task.id, {999: "x"})
+
+
 class TestPlanOutcome:
     """Plan parsing fallbacks."""
 

@@ -38,6 +38,9 @@ class ActionRoutes:
             ("cleanup/{proposal_id}/apply", self.apply),
         ):
             self.router.add_api_route("/" + path, endpoint, methods=["POST"])
+        self.router.add_api_route(
+            "/tasks/{task_id}/answers/save", self.save_answers, methods=["POST"]
+        )
         self.router.add_api_route("/runs", self.runs, methods=["GET"])
         self.router.add_api_route("/runs/{run_id}", self.get_run, methods=["GET"])
         self.router.add_api_route("/runs/{run_id}/log", self.run_log, methods=["GET"])
@@ -121,6 +124,14 @@ class ActionRoutes:
                 model=body.model,
             )
         )
+
+    async def save_answers(self, task_id: int, body: Answers) -> dict[str, int]:
+        """Save answers without resuming anything (task in any status)."""
+        saved = self._access.runtime.runner.save_answers(
+            task_id, {a.question_id: a.text for a in body.answers}
+        )
+        self._access.runtime.changed(task_id)
+        return {"saved": saved}
 
     async def send_back(self, task_id: int, body: Comment) -> Task:
         """Send review feedback through the runner's workflow authority."""

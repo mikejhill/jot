@@ -70,8 +70,10 @@ test('list rows offer one-click actions per status and expand inline', () => {
   assert.deepEqual(labels('done'), []);
   const detail = {events:[{kind:'plan',body:{text:'Step 1'}},{kind:'question',body:{text:'Which DB?'}}],
     questions:[{id:2,text:'Which DB?',choices:[],answer:'Postgres'}]};
-  const texts = strings(app.renderExpanded({...task, status:'awaiting_approval'}, detail));
-  assert(texts.includes('Step 1') && texts.includes('Which DB?') && texts.includes('Postgres'));
+  const expanded = app.renderExpanded({...task, status:'awaiting_approval'}, detail);
+  const texts = strings(expanded);
+  assert(texts.includes('Step 1') && texts.includes('Which DB?'));
+  assert.equal(walk(expanded).find(n => n.type === 'textarea').props.defaultValue, 'Postgres');
 });
 
 const strings = tree => walk(tree).flatMap(n => [n.props?.children].flat()).filter(c => typeof c === 'string');
@@ -114,7 +116,8 @@ test('needs_input shows one input per question and posts answers', async () => {
   assert.equal(nodes.filter(n => n.type === 'fieldset').length, 2);
   assert.deepEqual(nodes.filter(n => n.props?.type === 'radio').map(n => n.props.value), ['pg','lite']);
   assert.equal(nodes.find(n => n.type === 'textarea').props.defaultValue, 'Friday');
-  assert(strings(tree).join('').includes('continues execution'));
+  assert(strings(tree).join('').includes('resumes execution'));
+  assert(strings(tree).includes('Send answers and continue'));
   assert(noRawHtml(app.renderOutput(t, detail)));
   assert(walk(app.renderOutput(t, detail)).some(n => n.type === 'h2'));
 
@@ -223,4 +226,17 @@ test('capture picker is available without an open task drawer', () => {
   assert(nodes.some(n => n.props?.class === 'capture-chip'));
   assert(!nodes.some(n => n.props?.role === 'dialog'));
   assert.equal(nodes.filter(n => n.props?.id === 'capture').length, 1);
+});
+
+
+test('questions are answerable in any status: save-only form outside needs_input', () => {
+  const app = new App();
+  const detail = {events:[], questions:[{id:7,text:'Which tone?',choices:[],answer:null},{id:8,text:'Length?',choices:[],answer:'Short'}]};
+  const tree = app.renderQuestions({...task, status:'ready'}, detail);
+  const texts = strings(tree);
+  assert(texts.includes('Questions for you'));
+  assert(texts.includes('Save answers'));
+  assert(texts.some(t => t.includes('1 unanswered')));
+  assert(texts.join(' ').includes('Nothing runs now'));
+  assert.equal(walk(tree).filter(n => n.type === 'textarea').length, 2);
 });

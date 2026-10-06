@@ -97,6 +97,25 @@ class TestTaskDrawer:
         expect(timeline.locator("pre")).to_have_count(0)
 
 
+class TestAnswering:
+    """Questions are answerable from the drawer in any status."""
+
+    def test_save_answers_from_drawer(self, app: Page) -> None:
+        """The drawer shows open questions on top; saving records the answer."""
+        badge = app.locator("tr", has_text="Add functional health checks").locator(
+            ".q-badge"
+        )
+        expect(badge).to_contain_text("2 questions")
+        app.get_by_role("button", name="Add functional health checks").click()
+        section = app.locator(".drawer .questions-section")
+        expect(section).to_contain_text("Questions for you")
+        expect(section).to_contain_text("2 unanswered")
+        section.get_by_label("Answer to question 1").fill("Degraded")
+        section.get_by_role("button", name="Save answers").click()
+        expect(section).to_contain_text("1 unanswered")
+        expect(app.locator(".toast").last).to_contain_text("answer(s) saved")
+
+
 class TestListView:
     """One-click row actions and inline plan review."""
 
