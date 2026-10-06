@@ -168,10 +168,19 @@ class RunService:
         self.runs = RunRepository(db)
         self.workflow = Workflow(db, config.drawdown.default_flow)
         self.instructions = InstructionStore(home)
-        self.git = GitWorkspaces()
+        self.git = GitWorkspaces(self._worktree_root())
         self.logs = home.path / "runs"
         self._active: dict[int, asyncio.Task[None]] = {}
         self._slots = asyncio.Semaphore(config.drawdown.concurrency)
+
+    def _worktree_root(self) -> Path:
+        """Return the configured worktree folder (default ``$JOT_HOME/worktrees``)."""
+        configured = self.config.execution.worktree_root.strip()
+        return (
+            Path(configured).expanduser()
+            if configured
+            else self.home.path / "worktrees"
+        )
 
     # Public API
 

@@ -27,6 +27,9 @@ concurrency = 1
 
 [execution]
 isolation = "worktree"
+# Where task worktrees go: <worktree_root>/<repo>/<id>-<slug> on branch jot/<id>-<slug>.
+# Empty = $JOT_HOME/worktrees.
+worktree_root = ""
 
 [server]
 host = "127.0.0.1"
@@ -136,6 +139,7 @@ class ExecutionConfig:
     """Repository isolation policy."""
 
     isolation: str = "worktree"
+    worktree_root: str = ""
 
 
 @dataclass(frozen=True, slots=True)

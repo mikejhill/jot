@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
+import subprocess
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -187,7 +189,9 @@ class TestFailures:
 class TestWorkspaces:
     """Repository resolution and git worktree isolation."""
 
-    def test_worktree(self, harness: Harness, db: Database, git_repo: Path) -> None:
+    def test_worktree(
+        self, harness: Harness, db: Database, home: JotHome, git_repo: Path
+    ) -> None:
         """Execution in a git repo uses a jot/<id>-<slug> worktree; plans don't."""
         project = ProjectRepository(db).create(
             Project(slug="demo", name="Demo", repo_path=str(git_repo))
@@ -202,12 +206,14 @@ class TestWorkspaces:
 
         run = asyncio.run(scenario())
         assert run.branch == f"jot/{task.id}-fix-the-widget"
+        expected = home.path / "worktrees" / "repo" / f"{task.id}-fix-the-widget"
         assert run.worktree is not None
-        assert Path(run.worktree).is_dir()
+        assert Path(run.worktree) == expected
+        assert expected.is_dir()
 
     def test_git_helpers(self, git_repo: Path, tmp_path: Path) -> None:
         """Worktrees are reused; non-repos are detected; diffstat is safe."""
-        git = GitWorkspaces()
+        git = GitWorkspaces(tmp_path / "wt")
 
         async def scenario() -> None:
             assert await git.is_repo(git_repo)
@@ -216,6 +222,7 @@ class TestWorkspaces:
             again = await git.worktree(git_repo, 1, "")
             assert first == again
             assert first.branch == "jot/1-task"
+            assert first.cwd == tmp_path / "wt" / "repo" / "1-task"
             (first.cwd / "new.txt").write_text("x", encoding="utf-8")
             assert "new.txt" in await git.diffstat(first)
             assert await git.diffstat(Workspace(cwd=tmp_path)) == ""
@@ -223,6 +230,48 @@ class TestWorkspaces:
                 await git.toplevel(tmp_path)
 
         asyncio.run(scenario())
+
+    def test_same_named_repos_and_config_root(
+        self, db: Database, home: JotHome, git_repo: Path, tmp_path: Path
+    ) -> None:
+        """Another repo with the same name gets its own folder; root is configurable."""
+        other = tmp_path / "elsewhere" / "repo"
+        other.mkdir(parents=True)
+        git_exe = shutil.which("git")
+        assert git_exe is not None
+        subprocess.run([git_exe, "init", "-q"], cwd=other, check=True)  # noqa: S603
+        subprocess.run(  # noqa: S603 - fixed git arguments
+            [
+                git_exe,
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
+            cwd=other,
+            check=True,
+        )
+        git = GitWorkspaces(tmp_path / "wt")
+
+        async def scenario() -> tuple[Workspace, Workspace]:
+            return await git.worktree(git_repo, 1, "a"), await git.worktree(
+                other, 2, "b"
+            )
+
+        first, second = asyncio.run(scenario())
+        assert first.cwd.parent.name == "repo"
+        assert second.cwd.parent.name.startswith("repo-")
+        custom = tmp_path / "custom-wt"
+        (home.path / "config.toml").write_text(
+            f'[execution]\nworktree_root = "{custom.as_posix()}"\n', encoding="utf-8"
+        )
+        service = RunService(db, home, home.initialize(), EventBus())
+        assert service.git.root == custom
 
     def test_in_place(self, harness: Harness, tmp_path: Path) -> None:
         """A non-git repo path runs in place."""

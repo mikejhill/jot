@@ -79,7 +79,7 @@ jot runs 12; jot log <run-id>
 
 In the UI, open a task to use **Plan first**, **Run now (direct)**, **Approve**, and **Send back**, with a backend picker and a live log. The List view supports bulk actions.
 
-- **Where agents work:** the task's `repo_path`, or else the project's `repo_path`, or else a scratch folder. Execution in a git repo happens in a worktree, `<repo>.jot/<id>-<slug>`, on branch `jot/<id>-<slug>`. The agent commits there and never pushes. You review and merge.
+- **Where agents work:** the task's `repo_path`, or else the project's `repo_path`, or else a scratch folder. Execution in a git repo happens in a worktree at `~/.jot/worktrees/<repo>/<id>-<slug>` on branch `jot/<id>-<slug>`. Change the location with `[execution] worktree_root`. The agent commits there and never pushes. You review and merge.
 - **No conflicts:** a claim is an atomic conditional update under `BEGIN IMMEDIATE` with a lease that the runner heartbeats. Two agents can never hold the same task. Expired leases are returned to the queue by the server, or by `jot reap`.
 - **External agents:** the `jot` skill's drawdown workflow lets an interactive Claude, Codex, or Copilot session use the same protocol: `jot claim`, then `jot comment --kind plan|question|result`, then `jot release --status …` (`needs_input` when blocked on questions).
 - **Rendering:** plans, results, descriptions, and timeline comments render as Markdown. The renderer builds DOM nodes directly and never injects HTML, so raw HTML in agent output appears as text. Links are limited to `http(s)` and `mailto`.
@@ -122,11 +122,9 @@ Layout: `src/jot/{db,core,agents,services,server,static,skills}`. The CLI is in 
 
 ### Contributing
 
-All changes go through pull requests against `main`:
-
-1. Create a branch (`feat/…`, `fix/…`, `chore/…`), or let `jot run` make a `jot/<id>-<slug>` worktree branch.
-2. Keep `uv run poe check` green. CI runs lint and strict type checks, tests on Linux, macOS, and Windows (Python 3.13 and 3.14), the UI tests, and a wheel build plus smoke test.
-3. Open a PR using the template and merge once CI passes.
+- Work directly on `main` or on a feature branch. Keep `uv run poe check` green.
+- Branches from Jot's own worktrees (`jot/<id>-<slug>`) are merged through pull requests that use the template.
+- CI runs on every push and PR: lint and strict type checks, tests on Linux, macOS, and Windows (Python 3.13 and 3.14), the UI tests, and a wheel build plus smoke test.
 
 Dependabot keeps GitHub Actions and the Python dependencies up to date.
 
