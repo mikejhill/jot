@@ -82,7 +82,7 @@ jot cleanup scan --agent           # heuristics + LLM review using cleanup.md
 jot cleanup apply 3 --approve 0,2  # only approved items; archive / soft-delete / note
 ```
 
-The `jot-cleanup` skill runs the same review conversationally. Nothing changes without item-level approval.
+The `jot-cleanup` skill runs the same review conversationally. The `jot-groom` skill queries the queue and suggests changes to apply with your approval: reprioritize, refine, merge or split tasks, fill in missing fields, or pick the next tasks to run. Nothing changes without item-level approval.
 
 ## Swapping agent SDKs
 

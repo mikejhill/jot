@@ -132,9 +132,9 @@ class TestCleanupAndSkills:
     def test_install_skills(self, cli: Cli, tmp_path: Path) -> None:
         """Every bundled skill is copied into the destination."""
         dest = tmp_path / "skills"
-        assert len(cli.rows("install-skills", "--dest", str(dest))) == 3
+        assert len(cli.rows("install-skills", "--dest", str(dest))) == 4
         names = sorted(p.name for p in dest.iterdir())
-        assert names == ["jot-capture", "jot-cleanup", "jot-drawdown"]
+        assert names == ["jot-capture", "jot-cleanup", "jot-drawdown", "jot-groom"]
         assert (dest / "jot-drawdown" / "SKILL.md").read_text("utf-8").startswith("---")
         cli.run("install-skills", "--target", "nope", code=1)
 
