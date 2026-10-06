@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/mikejhill/jot/actions/workflows/ci.yml/badge.svg)](https://github.com/mikejhill/jot/actions/workflows/ci.yml)
 ![Python 3.13+](https://img.shields.io/badge/python-3.13%2B-blue)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 Lightweight task capture with agent drawdown. Jot is a local SQLite task tracker with a CLI, a web UI, and agent skills. You type a quick note, and an LLM turns it into a structured task. When you want the work done, Claude, Codex, or Copilot draws it down with conflict-free claims. Everything runs locally; no hosted service is required.
 
@@ -128,3 +129,7 @@ All changes go through pull requests against `main`:
 3. Open a PR using the template and merge once CI passes.
 
 Dependabot keeps GitHub Actions and the Python dependencies up to date.
+
+## License
+
+[MIT](LICENSE)
