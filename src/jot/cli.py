@@ -25,6 +25,7 @@ from jot.core.models import (
     TaskEvent,
     TaskType,
 )
+from jot.core.questions import Questions
 from jot.core.workflow import Workflow
 from jot.db.connection import Database
 from jot.db.query import TaskQuery
@@ -217,10 +218,10 @@ class CommandLine:
         with self.session(json=json) as (db, _, _home):
             repo = TaskRepository(db)
             task = repo.get(task_id)
+            events = repo.events.for_task(task_id)
             value = task.model_dump(mode="json") | {
-                "events": [
-                    e.model_dump(mode="json") for e in repo.events.for_task(task_id)
-                ]
+                "events": [e.model_dump(mode="json") for e in events],
+                "questions": Questions.view(events),
             }
             self.emit(value, Output.json(value), json=json)
 
@@ -368,6 +369,8 @@ class CommandLine:
             if task.status == Status.AWAITING_APPROVAL or flow == Flow.DIRECT
             else Status.PLANNING
         )
+        if task.status == Status.NEEDS_INPUT:
+            target = Questions.resume_status(workflow.tasks.events.for_task(task_id))
         return (
             workflow.tasks.get(task_id)
             if workflow.claim(task_id, agent, target, lease_seconds, flow=flow)

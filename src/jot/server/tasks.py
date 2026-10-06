@@ -8,6 +8,7 @@ from fastapi import APIRouter, Query
 
 from jot.core.models import EventKind, Status, Task, TaskEvent
 from jot.core.prioritize import Prioritizer
+from jot.core.questions import Questions
 from jot.db.query import TaskQuery
 from jot.exceptions import RepositoryError, WorkflowError
 from jot.server.runtime import RuntimeAccess
@@ -76,18 +77,29 @@ class TaskRoutes:
         return result
 
     async def get(self, task_id: int) -> dict[str, object]:
-        """Return content, project, history, runs, and valid moves."""
+        """Return content, project, history, questions, runs, and valid moves."""
         runtime = self._access.runtime
         task = runtime.tasks.get(task_id)
+        events = runtime.tasks.events.for_task(task_id)
         return {
             "task": task,
-            "events": runtime.tasks.events.for_task(task_id),
+            "events": events,
+            "questions": Questions.view(events),
+            "resume_phase": self._resume_phase(task, events),
             "runs": [run for run in runtime.runs.list() if run.task_id == task_id],
             "project": runtime.projects.get(task.project_id)
             if task.project_id
             else None,
             "transitions": self._transitions(task),
         }
+
+    @staticmethod
+    def _resume_phase(task: Task, events: list[TaskEvent]) -> str | None:
+        """Name the run phase that answering a needs_input task resumes."""
+        if task.status is not Status.NEEDS_INPUT:
+            return None
+        resumed = Questions.resume_status(events)
+        return "execute" if resumed is Status.EXECUTING else "plan"
 
     def _transitions(self, task: Task) -> list[str]:
         """Expose only domain-approved moves for unclaimed, live tasks."""

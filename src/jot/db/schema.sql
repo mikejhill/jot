@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     raw_input TEXT NOT NULL DEFAULT '', project_id INTEGER REFERENCES projects(id),
     type TEXT NOT NULL CHECK(type IN ('feature','bug','chore','research','idea')),
     criticality TEXT NOT NULL CHECK(criticality IN ('low','medium','high','critical')),
-    status TEXT NOT NULL CHECK(status IN ('inbox','ready','planning','awaiting_approval',
+    status TEXT NOT NULL CHECK(status IN ('inbox','ready','planning','needs_input','awaiting_approval',
         'executing','review','done','blocked','wont_do','archived')),
     flow TEXT CHECK(flow IN ('planned','direct')), repo_path TEXT, due_at TEXT,
     source TEXT NOT NULL CHECK(source IN ('cli','ui','agent')),

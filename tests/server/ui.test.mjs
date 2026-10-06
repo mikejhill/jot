@@ -1,6 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {App, TaskEditor, ProjectEditor} from '../../src/jot/static/app.js';
+import {markdown, safeUrl} from '../../src/jot/static/markdown.js';
 
 // Render templates as virtual nodes; no browser, server, DOM, or network.
 function walk(node) {
@@ -62,14 +63,82 @@ test('list rows offer one-click actions per status and expand inline', () => {
     .filter(n => n.type === 'button').map(n => [n.props.children].flat().join(''));
   Object.assign(app.state, {runs:[{id:9,task_id:1,ended_at:null}]});
   assert.deepEqual(labels('ready'), ['Plan', 'Run now']);
+  assert.deepEqual(labels('needs_input'), ['Answer', 'Send back']);
   assert.deepEqual(labels('awaiting_approval'), ['Approve', 'Send back']);
   assert.deepEqual(labels('executing'), ['Cancel']);
   assert.deepEqual(labels('review'), ['Done', 'Send back']);
   assert.deepEqual(labels('done'), []);
-  const detail = {events:[{kind:'plan',body:{text:'Step 1'}},{kind:'question',body:{text:'Which DB?'}}]};
-  const texts = walk(app.renderExpanded({...task, status:'awaiting_approval'}, detail))
-    .flatMap(n => [n.props?.children].flat()).filter(c => typeof c === 'string');
-  assert(texts.includes('Step 1') && texts.includes('Which DB?'));
+  const detail = {events:[{kind:'plan',body:{text:'Step 1'}},{kind:'question',body:{text:'Which DB?'}}],
+    questions:[{id:2,text:'Which DB?',choices:[],answer:'Postgres'}]};
+  const texts = strings(app.renderExpanded({...task, status:'awaiting_approval'}, detail));
+  assert(texts.includes('Step 1') && texts.includes('Which DB?') && texts.includes('Postgres'));
+});
+
+const strings = tree => walk(tree).flatMap(n => [n.props?.children].flat()).filter(c => typeof c === 'string');
+const noRawHtml = tree => walk(tree).every(n => !n.props || !('dangerouslySetInnerHTML' in n.props));
+
+test('markdown renders structure as elements', () => {
+  const tree = markdown('# Plan\n\n1. First **bold**\n2. Second\n   - nested `code`\n\n```py\nprint("<b>")\n```\n\n> quoted\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n---\ntext with _em_ and ~~old~~');
+  const types = walk(tree).map(n => n.type);
+  for (const tag of ['h1','ol','li','strong','ul','code','pre','blockquote','table','th','td','hr','em','del','p']) assert(types.includes(tag), tag);
+  const pre = walk(tree).find(n => n.type === 'pre');
+  assert.equal(walk(pre).find(n => n.type === 'code').props.class, 'language-py');
+  assert(strings(tree).includes('print("<b>")'));
+  const ol = walk(markdown('3. three\n\n4. four')).filter(n => n.type === 'ol');
+  assert.equal(ol.length, 1);
+  assert.equal(ol[0].props.start, 3);
+});
+
+test('markdown never injects raw HTML or unsafe links', () => {
+  const payload = '<script>alert(1)</script>\n\n<img src=x onerror=alert(1)>\n\n[click](javascript:alert(1)) [data](data:text/html,x) [ok](https://example.com) <mailto:me@example.com>';
+  const tree = markdown(payload);
+  assert(noRawHtml(tree));
+  const types = new Set(walk(tree).map(n => n.type));
+  assert(!types.has('script') && !types.has('img'));
+  assert(strings(tree).some(s => s.includes('<script>alert(1)</script>')));
+  const hrefs = walk(tree).filter(n => n.type === 'a').map(n => n.props.href);
+  assert.deepEqual(hrefs, ['https://example.com', 'mailto:me@example.com']);
+  assert(walk(tree).filter(n => n.type === 'a').every(n => n.props.rel === 'noopener noreferrer'));
+  assert(strings(tree).includes('click'));
+  assert.equal(safeUrl('java\nscript:alert(1)'), null);
+  assert.equal(safeUrl(' HTTPS://x.dev '), 'HTTPS://x.dev');
+});
+
+test('needs_input shows one input per question and posts answers', async () => {
+  const app = new App();
+  const detail = {events:[{kind:'plan',body:{text:'## Steps\n1. Pick'}}], resume_phase:'execute',
+    questions:[{id:5,text:'Which DB?',choices:['pg','lite'],answer:null},{id:6,text:'Deadline?',choices:[],answer:'Friday'}]};
+  const t = {...task, status:'needs_input'};
+  const tree = app.renderQuestions(t, detail);
+  const nodes = walk(tree);
+  assert.equal(nodes.filter(n => n.type === 'fieldset').length, 2);
+  assert.deepEqual(nodes.filter(n => n.props?.type === 'radio').map(n => n.props.value), ['pg','lite']);
+  assert.equal(nodes.find(n => n.type === 'textarea').props.defaultValue, 'Friday');
+  assert(strings(tree).join('').includes('continues execution'));
+  assert(noRawHtml(app.renderOutput(t, detail)));
+  assert(walk(app.renderOutput(t, detail)).some(n => n.type === 'h2'));
+
+  const calls = [];
+  const fetchBefore = globalThis.fetch, formBefore = globalThis.FormData;
+  globalThis.fetch = async (url, init) => { calls.push([url, JSON.parse(init.body)]); return {ok:true, json:async () => ({})}; };
+  globalThis.FormData = class { get(name) { return {q5:'pg', 'q5-other':'', q6:' Monday '}[name]; } };
+  app.act = async action => { await action(); return true; };
+  app.toast = () => {};
+  Object.assign(app.state, {backend:'claude', picks:{plan:{}, execute:{backend:'codex', model:'astra'}}});
+  try { await app.answer({preventDefault() {}, currentTarget:{}}, t, detail); }
+  finally { globalThis.fetch = fetchBefore; globalThis.FormData = formBefore; }
+  assert.deepEqual(calls, [['/api/tasks/1/answers', {answers:[{question_id:5,text:'pg'},{question_id:6,text:'Monday'}], backend:'codex', model:'astra'}]]);
+});
+
+test('timeline renders event text as markdown and other fields as details', () => {
+  const app = new App();
+  const md = walk(app.renderEventBody({kind:'plan', body:{text:'# Title', run_id:3, choices:[]}}));
+  assert(md.some(n => n.type === 'h1'));
+  assert(strings(md).includes('run id: 3'));
+  const raw = walk(app.renderEventBody({kind:'status', body:{from:'ready', to:'planning'}}));
+  assert(strings(raw).includes('from: ready\nto: planning'));
+  const listed = strings(app.renderEventBody({kind:'question', body:{text:'Q', choices:['a','b']}}));
+  assert(listed.includes('choices: a | b'));
 });
 
 test('model pickers resolve per-action choices with config defaults', () => {

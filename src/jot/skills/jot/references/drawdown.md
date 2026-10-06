@@ -25,7 +25,8 @@ If the user named a task, use that one.
 **Option A: hand it to Jot's runner (non-interactive, recommended for batch work).** Jot claims the task, runs Claude, Codex, or Copilot headlessly, and records everything:
 
 ```bash
-jot plan <id> --backend claude      # planned flow: read-only plan + questions -> awaiting_approval
+jot plan <id> --backend claude      # planned flow: read-only plan -> awaiting_approval (needs_input if it has questions)
+jot answer <id> -a <event-id>=<text> # answer a needs_input task's questions; the same phase resumes
 jot approve <id> --note "answers"   # after the user approves: executes in a git worktree -> review
 jot run <id> --direct               # direct flow: skip planning, execute now -> review
 jot run --next --project <slug>     # take the top ready task
@@ -54,6 +55,12 @@ If the claim fails (another agent holds it, or the task isn't ready), stop and p
   jot comment <id> --kind result --actor "$AGENT" "<what changed, how verified, branch, follow-ups>"
   jot release <id> --agent "$AGENT" --status review
   ```
+- **Blocked on the owner (either flow):** post each question and release to `needs_input`. Then **stop**:
+  ```bash
+  jot comment <id> --kind question --actor "$AGENT" "<one open question>"
+  jot release <id> --agent "$AGENT" --status needs_input
+  ```
+  Their answers arrive as `answer` events (`jot show <id> --json` lists `questions` with each `answer`). `jot claim <id> --agent "$AGENT"` resumes the phase you paused (planning or executing).
 - If you must abandon the task: `jot release <id> --agent "$AGENT"` (it goes back to its prior status), with a comment explaining why.
 
 Long work: re-run `jot claim` from another agent fails while your lease is live. Expired leases are returned to the queue by `jot reap`.

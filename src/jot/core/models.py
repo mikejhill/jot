@@ -14,6 +14,7 @@ class Status(StrEnum):
     INBOX = "inbox"
     READY = "ready"
     PLANNING = "planning"
+    NEEDS_INPUT = "needs_input"
     AWAITING_APPROVAL = "awaiting_approval"
     EXECUTING = "executing"
     REVIEW = "review"
@@ -62,6 +63,10 @@ class EventKind(StrEnum):
     APPROVAL = "approval"
     RUN_LOG = "run_log"
     RESULT = "result"
+
+
+type EventValue = str | int | float | bool | list[str] | None
+type EventBody = dict[str, EventValue]
 
 
 class Clock:
@@ -151,7 +156,7 @@ class TaskEvent(Record):
     ts: datetime = Field(default_factory=Clock.now)
     actor: str
     kind: EventKind
-    body: dict[str, str | int | float | bool | None] = Field(default_factory=dict)
+    body: EventBody = Field(default_factory=dict)
 
 
 class Run(Record):

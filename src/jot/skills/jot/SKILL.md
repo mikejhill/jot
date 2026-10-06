@@ -21,7 +21,7 @@ Read only the reference you need. A request can chain workflows: "look at my jot
 ## Essentials (always apply)
 
 - **Model of a task:** title, description, raw note, project (slug), labels, criticality (low/medium/high/critical), type (feature/bug/chore/research/idea), status, optional repo path, and an event history (comments, plans, questions, answers, results).
-- **Statuses:** `inbox → ready → planning → awaiting_approval → executing → review → done` (planned flow). The direct flow skips planning and approval. Other statuses: `blocked`, `wont_do`, `archived`. Only runs or claims move a task into `planning` or `executing`; never `jot move` it there.
+- **Statuses:** `inbox → ready → planning → awaiting_approval → executing → review → done` (planned flow). The direct flow skips planning and approval. A run (plan or execute) that needs the owner's input parks in `needs_input` until they answer, then resumes the same phase. Other statuses: `blocked`, `wont_do`, `archived`. Only runs or claims move a task into `planning` or `executing`; never `jot move` it there.
 - **Read freely. Change with consent:** edits, moves, merges, cleanup, and executing work need the user's approval for those specific changes. Capturing a task the user asked for needs no extra confirmation.
 - **Never touch a task someone else has claimed** (`claimed_by` set). Claim before you work on a task yourself.
 - **Owner guidance:** `$JOT_HOME/instructions/{triage,drawdown,cleanup}.md` and `instructions/projects/<slug>.md` override the defaults in these references. Read the relevant file before drawdown or cleanup.

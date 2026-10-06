@@ -9,6 +9,7 @@ from fastapi import APIRouter, Body
 from jot.core.models import Run, Task
 from jot.server.runtime import RuntimeAccess
 from jot.server.schemas import (
+    Answers,
     ApplyCleanup,
     Approval,
     Comment,
@@ -30,6 +31,7 @@ class ActionRoutes:
             ("tasks/{task_id}/run", self.run),
             ("tasks/{task_id}/approve", self.approve),
             ("tasks/{task_id}/send-back", self.send_back),
+            ("tasks/{task_id}/answers", self.answers),
             ("runs/{run_id}/cancel", self.cancel),
             ("cleanup/scan", self.scan),
             ("cleanup/{proposal_id}/apply", self.apply),
@@ -90,6 +92,17 @@ class ActionRoutes:
             await self._access.runtime.runner.approve(
                 task_id,
                 note=body.note,
+                backend=body.backend,
+                model=body.model,
+            )
+        )
+
+    async def answers(self, task_id: int, body: Answers) -> Run:
+        """Save answers and resume the agent phase that asked the questions."""
+        return self._run_changed(
+            await self._access.runtime.runner.respond(
+                task_id,
+                {a.question_id: a.text for a in body.answers},
                 backend=body.backend,
                 model=body.model,
             )

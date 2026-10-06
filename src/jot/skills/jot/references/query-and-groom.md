@@ -54,7 +54,8 @@ jot add "<new task>" --project <slug> --label ... --title "..."   # for splits; 
 When the user wants the chosen tasks done, use [drawdown.md](drawdown.md), or Jot's runner:
 
 ```bash
-jot plan <id> [--backend claude --model opus]     # read-only plan + questions -> awaiting_approval
+jot plan <id> [--backend claude --model opus]     # read-only plan -> awaiting_approval (needs_input if it has questions)
+jot answer <id> -a <question-event-id>=<text>     # answer a needs_input task; the run resumes
 jot approve <id> --note "answers" [--model sonnet]
 jot run <id> --direct                              # small, clear tasks
 ```

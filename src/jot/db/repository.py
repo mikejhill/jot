@@ -9,6 +9,7 @@ from typing import ClassVar, override
 
 from jot.core.models import (
     Clock,
+    EventBody,
     EventKind,
     Project,
     Record,
@@ -323,7 +324,7 @@ class TaskRepository(Repository[Task]):
         self,
         task_id: int,
         kind: EventKind,
-        body: dict[str, str | int | float | bool | None],
+        body: EventBody,
         *,
         actor: str = "cli",
     ) -> TaskEvent:

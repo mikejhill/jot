@@ -33,8 +33,10 @@ def config(home: JotHome) -> Config:
 def canned() -> Iterator[None]:
     """Reset the fake backend's canned output around every test."""
     FakeBackend.canned = {}
+    FakeBackend.replies = []
     yield
     FakeBackend.canned = {}
+    FakeBackend.replies = []
 
 
 @pytest.fixture

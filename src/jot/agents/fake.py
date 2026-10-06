@@ -22,6 +22,7 @@ class FakeBackend(AgentBackend):
 
     name: ClassVar[str] = "fake"
     canned: ClassVar[JsonObject] = {}
+    replies: ClassVar[list[str]] = []
 
     @override
     async def structured(
@@ -33,9 +34,14 @@ class FakeBackend(AgentBackend):
 
     @override
     async def run(self, request: RunRequest) -> AsyncIterator[AgentEvent]:
-        """Emit one tool event, one text event, then a result."""
+        """Emit one tool event, one text event, then a result.
+
+        Tests queue scripted result texts in ``FakeBackend.replies``.
+        """
         yield AgentEvent(AgentEventKind.TOOL, f"Read {request.cwd}")
-        if request.mode is AgentMode.PLAN:
+        if self.replies:
+            text = self.replies.pop(0)
+        elif request.mode is AgentMode.PLAN:
             text = '{"plan": "1. Do the thing", "questions": [], "summary": "ok"}'
         else:
             text = "Done: implemented the change."

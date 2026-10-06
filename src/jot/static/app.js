@@ -1,8 +1,9 @@
 import { h, render, Component } from './vendor/preact.mjs';
 import htm from './vendor/htm.mjs';
+import {markdown} from './markdown.js';
 
 const html = htm.bind(h);
-const statuses = ['inbox','ready','planning','awaiting_approval','executing','review','done','blocked','wont_do','archived'];
+const statuses = ['inbox','ready','planning','needs_input','awaiting_approval','executing','review','done','blocked','wont_do','archived'];
 const criticalities = ['low','medium','high','critical'];
 const types = ['feature','bug','chore','research','idea'];
 const backends = ['claude','codex','copilot'];
@@ -12,6 +13,8 @@ const split = value => String(value || '').split(',').map(s => s.trim()).filter(
 const formValues = event => Object.fromEntries(new FormData(event.currentTarget));
 const options = values => values.map(value => html`<option value=${value}>${human(value)}</option>`);
 const pill = (value, extra = '') => html`<span class=${`pill ${value} ${extra}`}>${human(value)}</span>`;
+const markdownKinds = new Set(['plan','result','comment','question','answer','approval']);
+const latest = (events, kind) => [...events].reverse().find(e => e.kind === kind);
 
 class Api {
   static async request(path, method = 'GET', body) {
@@ -151,6 +154,17 @@ class App extends Component {
     if (version !== this.refreshVersion) return;
     this.setState(s => ({tasks,projects,runs,labels,loaded:true,selected:s.selected.filter(id => tasks.some(t => t.id === id))}));
     if (this.state.detail) await this.openTask(this.state.detail.task.id, false);
+    await this.refreshExpanded();
+  }
+  async refreshExpanded() {
+    const ids = Object.keys(this.state.expanded);
+    if (!ids.length) return;
+    const details = await Promise.all(ids.map(id => Api.request(`/tasks/${id}`).catch(() => null)));
+    this.setState(s => {
+      const expanded = {...s.expanded};
+      ids.forEach((id, i) => { if (details[i] && expanded[id]) expanded[id] = details[i]; });
+      return {expanded};
+    });
   }
   async openTask(id, focus = true) {
     const version = ++this.detailVersion;
@@ -194,6 +208,15 @@ class App extends Component {
     const choice = this.pick('execute');
     if (await this.act(() => Api.request(`/tasks/${id}/approve`, 'POST', {note:note || null, ...choice}))) this.toast(`#${id}: approved, executing with ${choice.backend}/${choice.model || 'default'}`);
   }
+  async answer(event, t, d) {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    const value = name => String(data.get(name) || '').trim();
+    const answers = d.questions.map(q => ({question_id:q.id, text:value(`q${q.id}-other`) || value(`q${q.id}`)}));
+    const phase = d.resume_phase === 'execute' ? 'execute' : 'plan';
+    const choice = this.pick(phase);
+    if (await this.act(() => Api.request(`/tasks/${t.id}/answers`, 'POST', {answers, ...choice}))) this.toast(`#${t.id}: answers sent, ${phase === 'execute' ? 'executing' : 'planning'} with ${choice.backend}/${choice.model || 'default'}`);
+  }
   async sendBack(id) {
     const comment = prompt('What needs to change?');
     if (comment) await this.act(() => Api.request(`/tasks/${id}/send-back`, 'POST', {comment}));
@@ -215,23 +238,49 @@ class App extends Component {
   rowActions(t) {
     const active = this.state.runs.find(r => r.task_id === t.id && !r.ended_at);
     if (t.status === 'ready') return html`<button onClick=${() => this.run(t.id,'planned')}>Plan</button><button onClick=${() => this.run(t.id,'direct')}>Run now</button>`;
+    if (t.status === 'needs_input') return html`<button class="primary" onClick=${() => this.state.expanded[t.id] ? null : this.toggleExpand(t.id)}>Answer</button><button onClick=${() => this.sendBack(t.id)}>Send back</button>`;
     if (t.status === 'awaiting_approval') return html`<button class="primary" onClick=${() => this.approve(t.id)}>Approve</button><button onClick=${() => this.sendBack(t.id)}>Send back</button>`;
     if (['planning','executing'].includes(t.status)) return active ? html`<button onClick=${() => this.act(() => Api.request(`/runs/${active.id}/cancel`,'POST'))}>Cancel</button>` : html`<span class="pill">running…</span>`;
     if (t.status === 'review') return html`<button class="primary" onClick=${() => this.move(t.id,'done')}>Done</button><button onClick=${() => this.sendBack(t.id)}>Send back</button>`;
     if (t.status === 'inbox') return html`<button onClick=${() => this.move(t.id,'ready')}>Mark ready</button>`;
     return null;
   }
+  renderQuestions(t, d) {
+    const questions = d.questions || [];
+    if (!questions.length) return null;
+    if (t.status !== 'needs_input') {
+      return html`<h4>Questions</h4><ol class="questions">${questions.map(q => html`<li>${markdown(q.text)}${q.answer ? html`<p class="answer"><strong>Answer:</strong> ${q.answer}</p>` : html`<small>No answer</small>`}</li>`)}</ol>`;
+    }
+    const phase = d.resume_phase === 'execute' ? 'execution' : 'planning';
+    return html`<form class="question-form" onSubmit=${e => this.answer(e, t, d)}>
+      <h4>The agent needs your input</h4>
+      <p class="muted">Answer what you can. Blank answers leave it to the agent's judgement. Your answers go back to the agent, which continues ${phase}.</p>
+      ${questions.map((q, i) => html`<fieldset class="question" key=${q.id}>
+        <div class="question-text"><span class="question-number">${i + 1}</span>${markdown(q.text)}</div>
+        ${q.choices.length > 0 ? html`<div class="choices" role="radiogroup" aria-label=${'Choices for question ' + (i + 1)}>${q.choices.map(c => html`<label class="choice"><input type="radio" name=${'q' + q.id} value=${c} defaultChecked=${q.answer === c}/><span>${c}</span></label>`)}</div>
+          <input name=${'q' + q.id + '-other'} aria-label=${'Other answer to question ' + (i + 1)} placeholder="Or write your own answer" defaultValue=${q.answer && !q.choices.includes(q.answer) ? q.answer : ''}/>`
+        : html`<textarea name=${'q' + q.id} rows="2" aria-label=${'Answer to question ' + (i + 1)} placeholder="Your answer (optional)" defaultValue=${q.answer || ''}/>`}
+      </fieldset>`)}
+      <button class="primary">Send answers and continue</button>
+    </form>`;
+  }
+  renderOutput(t, d) {
+    const plan = latest(d.events, 'plan'), result = latest(d.events, 'result');
+    return html`${plan ? html`<h4>Latest plan</h4>${markdown(plan.body.text, 'plan')}` : html`<p class="muted">No plan yet.</p>`}
+      ${this.renderQuestions(t, d)}
+      ${result && html`<h4>Latest result</h4>${markdown(result.body.text)}${result.body.branch && html`<small>Branch: ${result.body.branch}</small>`}`}`;
+  }
+  renderEventBody(event) {
+    const {text, ...rest} = event.body;
+    const extras = Object.entries(rest).filter(([, v]) => v !== null && v !== '' && !(Array.isArray(v) && !v.length));
+    return html`${text !== undefined && (markdownKinds.has(event.kind) ? markdown(text) : html`<pre>${String(text)}</pre>`)}
+      ${extras.length > 0 && html`<pre>${extras.map(([k,v]) => `${human(k)}: ${Array.isArray(v) ? v.join(' | ') : v}`).join('\n')}</pre>`}`;
+  }
   renderExpanded(t, d) {
-    const latest = kind => [...d.events].reverse().find(e => e.kind === kind);
-    const plan = latest('plan'), result = latest('result');
-    const planIndex = plan ? d.events.indexOf(plan) : -1;
-    const questions = d.events.filter((e, i) => e.kind === 'question' && i >= planIndex);
     return html`<tr class="expanded-row"><td></td><td colspan="6"><div class="expanded">
-      ${t.description && html`<details><summary>Description</summary><pre>${t.description}</pre></details>`}
-      ${plan ? html`<h4>Latest plan</h4><pre>${plan.body.text}</pre>` : html`<p class="muted">No plan yet.</p>`}
-      ${questions.length > 0 && html`<h4>Open questions</h4><ul>${questions.map(q => html`<li>${q.body.text}</li>`)}</ul>`}
-      ${result && html`<h4>Latest result</h4><pre>${result.body.text}</pre>${result.body.branch && html`<small>Branch: ${result.body.branch}</small>`}`}
-      ${t.status === 'awaiting_approval' && html`<form class="toolbar" onSubmit=${e => {e.preventDefault(); this.approve(t.id, formValues(e).note);}}><input name="note" placeholder="Answers / approval note (optional)"/><button class="primary">Approve</button></form>`}
+      ${t.description && html`<details><summary>Description</summary>${markdown(t.description)}</details>`}
+      ${this.renderOutput(t, d)}
+      ${t.status === 'awaiting_approval' && html`<form class="toolbar" onSubmit=${e => {e.preventDefault(); this.approve(t.id, formValues(e).note);}}><input name="note" placeholder="Approval note (optional)"/><button class="primary">Approve</button></form>`}
     </div></td></tr>`;
   }
   async bulk(action, value) {
@@ -280,6 +329,7 @@ class App extends Component {
         ${tasks.map(t => html`<button class="card" draggable=${!t.claimed_by} onDragStart=${e => e.dataTransfer.setData('text/plain',String(t.id))} onClick=${() => this.openTask(t.id)}>
           <small>#${t.id} · ${this.state.projects.find(p => p.id === t.project_id)?.name || 'Personal'}</small><strong>${t.title}</strong>
           ${t.needs_enrichment && t.status === "inbox" && html`<span class="enriching">inbox · enriching…</span>`}
+          ${t.status === 'needs_input' && html`<span class="needs-input">Waiting for your answers</span>`}
           <div class="chips">${pill(t.criticality)}${pill(t.type)}${t.labels.map(label => pill(label))}</div>
         </button>`)}${!tasks.length && html`<p class="empty-small">Drop a task here</p>`}
       </section>`;
@@ -287,7 +337,8 @@ class App extends Component {
   }
   renderList() {
     const {selected,preset,expanded} = this.state;
-    const presets = {open:['Open', t => !['done','archived','wont_do'].includes(t.status)], attention:['Needs attention', t => ['awaiting_approval','review'].includes(t.status)],
+    const presets = {open:['Open', t => !['done','archived','wont_do'].includes(t.status)], attention:['Needs attention', t => ['needs_input','awaiting_approval','review'].includes(t.status)],
+      input:['Needs input', t => t.status === 'needs_input'],
       ready:['Ready', t => t.status === 'ready'], progress:['In progress', t => ['planning','executing'].includes(t.status)], all:['All', () => true]};
     const tasks = this.state.tasks.filter(presets[preset][1]);
     return html`<div class="panel"><div class="toolbar">${this.renderPicker('plan','Plan with')}${this.renderPicker('execute','Execute with')}</div>
@@ -335,13 +386,14 @@ class App extends Component {
       <header class="drawer-header"><strong>Task #${t.id}</strong>${pill(t.status)}<button class="drawer-close" aria-label="Close task" onClick=${() => this.closeDetail()}>✕</button></header>
       <div class="drawer-body"><div class="chips">${pill(t.criticality)}${pill(t.type)}${t.labels.map(l => pill(l))}</div>
       <${TaskEditor} key=${t.id} task=${t} projects=${this.state.projects} app=${this}/>
+      <section class="output"><h2>Agent output</h2>${this.renderOutput(t, d)}</section>
       <section class="actions"><h2>Draw down</h2><div class="toolbar">${this.renderPicker('plan','Plan with')}${this.renderPicker('execute','Execute with')}</div><div class="toolbar"><button onClick=${() => this.run(t.id,'planned')}>Plan first</button><button onClick=${() => this.run(t.id,'direct')}>Run now (direct)</button></div>
       <form onSubmit=${e => {e.preventDefault(); const {note} = formValues(e); this.approve(t.id, note);}}><label>Approval note<input name="note" placeholder="Optional approval note"/></label><button class="primary">Approve</button></form>
       <form onSubmit=${e => {e.preventDefault(); const body = formValues(e); this.act(() => Api.request(`/tasks/${t.id}/send-back`,'POST',body));}}><label>Send-back feedback<input name="comment" required placeholder="What needs to change?"/></label><button>Send back</button></form>
       <div class="toolbar"><button onClick=${() => this.act(() => Api.request(`/tasks/${t.id}/enrich`,'POST',{}))}>Re-enrich</button><select aria-label="Move task status" value="" onChange=${e => this.move(t.id,e.target.value)}><option value="">Move status…</option>${options(d.transitions)}</select><button class="danger" onClick=${async () => {if (confirm('Delete this task? Its history will be retained.')) {this.closeDetail(); await this.act(() => Api.request(`/tasks/${t.id}`,'DELETE'));}}}>Delete</button></div></section>
       <h2>Runs & live output</h2>${this.renderRuns(d.runs)}<h2>Timeline</h2>
       <form onSubmit=${async e => {e.preventDefault(); const form=e.currentTarget, body=formValues(e); if (await this.act(() => Api.request(`/tasks/${t.id}/comment`,'POST',body))) form.reset();}}><label>Add a comment<textarea name="comment" required rows="2" placeholder="Answer a question or add context…"/></label><button>Post comment</button></form>
-      <ol class="timeline">${[...d.events].reverse().map(event => html`<li><div class="toolbar">${pill(event.kind)}<small>${event.actor} · ${date(event.ts)}</small></div><pre>${Object.entries(event.body).map(([k,v]) => ['text','content','markdown'].includes(k) ? String(v) : `${human(k)}: ${v}`).join('\n')}</pre></li>`)}</ol>
+      <ol class="timeline">${[...d.events].reverse().map(event => html`<li><div class="toolbar">${pill(event.kind)}<small>${event.actor} · ${date(event.ts)}</small></div>${this.renderEventBody(event)}</li>`)}</ol>
       <details><summary>Original capture</summary><pre>${t.raw_input}</pre></details></div></aside></div>`;
   }
   render() {

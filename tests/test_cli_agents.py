@@ -97,6 +97,30 @@ class TestAgentCommands:
         assert "No log" in cli.run("log", "99")
         assert "ready" in cli.run("send-back", "1", "redo")
 
+    def test_answer_and_external_resume(self, cli: Cli) -> None:
+        """Answer resumes the asking run; claim resumes the parked phase."""
+        cli.run("add", "note", "--wait")
+        FakeBackend.replies = [
+            '{"plan": "p", "questions": ["Which?"]}',
+            '{"plan": "p2", "questions": []}',
+        ]
+        cli.json("plan", "1")
+        shown = cli.json("show", "1")
+        assert shown["status"] == "needs_input"
+        questions = shown["questions"]
+        assert isinstance(questions, list)
+        question = Json.obj(questions[0])
+        cli.run("answer", "1", "--answer", "no-equals", code=1)
+        run = cli.json("answer", "1", "-a", f"{question['id']}=Use A")
+        assert run["phase"] == "plan"
+        assert "awaiting_approval" in cli.run("show", "1")
+
+        cli.run("add", "other", "--wait")
+        cli.run("claim", "2", "--agent", "a", "--direct")
+        cli.run("release", "2", "--agent", "a", "--status", "needs_input")
+        claimed = Json.obj(cli.json("claim", "2", "--agent", "b")["task"])
+        assert claimed["status"] == "executing"
+
     def test_direct_and_next(self, cli: Cli) -> None:
         """Run --direct, run --next, and the guard errors."""
         cli.run("add", "a", "--wait")

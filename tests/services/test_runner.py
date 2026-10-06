@@ -17,7 +17,7 @@ from jot.db.connection import Database
 from jot.db.repository import ProjectRepository, RunRepository, TaskRepository
 from jot.exceptions import AppError, WorkflowError
 from jot.services.bus import EventBus
-from jot.services.runner import PlanOutcome, RunService
+from jot.services.runner import PlanOutcome, Question, RunService
 from jot.services.workspace import GitWorkspaces, Workspace, WorkspaceError
 
 
@@ -243,7 +243,7 @@ class TestPlanOutcome:
     def test_parse(self) -> None:
         """JSON plans parse; prose becomes the plan text."""
         parsed = PlanOutcome.parse('{"summary": "s", "plan": "p", "questions": ["q"]}')
-        assert parsed == PlanOutcome("s", "p", ("q",))
+        assert parsed == PlanOutcome("s", "p", (Question("q1", "q"),))
         assert PlanOutcome.parse("just text").plan == "just text"
         assert PlanOutcome.parse('{"questions": "no"}').questions == ()
 

@@ -79,6 +79,21 @@ class Approval(Record):
     model: str | None = Field(default=None, max_length=200)
 
 
+class Answer(Record):
+    """The owner's reply to one question event; blank defers to the agent."""
+
+    question_id: int
+    text: str = Field(default="", max_length=20000)
+
+
+class Answers(Record):
+    """Answers to a needs_input task's questions, sent back to the agent."""
+
+    answers: list[Answer] = Field(default_factory=list)
+    backend: Backend | None = None
+    model: str | None = Field(default=None, max_length=200)
+
+
 class Enrichment(Record):
     """Optional enrichment backend override."""
 

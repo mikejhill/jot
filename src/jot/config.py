@@ -92,8 +92,10 @@ Which evidence supports urgency? What are the acceptance checks and rollback?
 Post unresolved questions as events instead of silently inventing requirements.
 
 Planned flow: inspect read-only, post a concrete plan and questions, then stop at
-awaiting_approval. Execute only after explicit approval. Direct flow: proceed
-within the authorized scope, recording assumptions and unresolved questions.
+awaiting_approval (or needs_input while questions block the plan). Execute only
+after explicit approval. Direct flow: proceed within the authorized scope,
+recording assumptions. In either flow, stop at needs_input with structured
+questions when the owner's input is required to continue.
 During execution use the configured isolation, preserve unrelated work, make
 focused changes, run acceptance checks, and post evidence plus remaining risks.
 Move to review when results are ready for a human; do not self-approve completion.

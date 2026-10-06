@@ -49,11 +49,17 @@ There are two flows. Choose one per run, or set a default per task, per project 
 ```text
 planned: inbox → ready → planning → awaiting_approval → executing → review → done
 direct:  inbox → ready → executing → review → done
+either:  planning | executing → needs_input → (answers) → same phase again
 ```
+
+**Questions from the agent.** Plan and execute runs can return structured questions (`{"id", "text", "choices"?}`). The task then moves to `needs_input`, and the run's lease is released. Each question appears in the UI with its own input: radio buttons when the agent suggested choices, otherwise a text box. Answers are optional. Submitting saves each one as an `answer` event linked to its question, then resumes the same phase (plan or execute). Blank answers leave the decision to the agent. The resumed run sees every question paired with its answer and reaches its own conclusion. If it asks more questions, the task returns to `needs_input`. You can also send the task back to `ready` instead of answering.
+
+`needs_input` is a separate status, not a flag on `awaiting_approval`, because execute runs can ask questions too. It shows which tasks are waiting on you and lets a paused run resume exactly where it stopped.
 
 ```bash
 jot next -n 5                      # ranked queue: criticality × project priority × age
-jot plan 12 --backend claude       # read-only plan + questions -> awaiting_approval
+jot plan 12 --backend claude       # read-only plan -> awaiting_approval (needs_input if it has questions)
+jot answer 12 -a 41="Postgres"     # answer question event 41 and resume the run
 jot approve 12 --note "answers…"   # execute -> review
 jot run 12 --direct --backend codex
 jot run --next --project orbit-api
@@ -63,13 +69,14 @@ jot runs 12; jot log <run-id>
 
 **Choosing models.** Every action can use a different model. Set defaults per backend and action in `config.toml` (`[models.claude] plan = "opus"`, `execute = "sonnet"`, and so on; `"default"` means the provider's default). Override any single run with `--model` on `jot plan`, `run`, `approve`, `enrich`, and `cleanup scan`, or with the model pickers in the UI. Each run records the model it used (`jot runs`).
 
-**One-click list.** The List view shows Plan / Run now, Approve / Send back, Done, or Cancel buttons on every row, depending on status. Use the "Plan with" and "Execute with" pickers above the table to choose backends and models. Expand a row (▸) to read the latest plan and open questions and approve it inline. Presets: Open, Needs attention, Ready, In progress, All.
+**One-click list.** The List view shows Plan / Run now, Answer / Send back, Approve / Send back, Done, or Cancel buttons on every row, depending on status. Use the "Plan with" and "Execute with" pickers above the table to choose backends and models. Expand a row (▸) to read the latest plan (rendered as Markdown), answer open questions, or approve it inline. Presets: Open, Needs attention, Needs input, Ready, In progress, All.
 
 In the UI, open a task to use **Plan first**, **Run now (direct)**, **Approve**, and **Send back**, with a backend picker and a live log. The List view supports bulk actions.
 
 - **Where agents work:** the task's `repo_path`, or else the project's `repo_path`, or else a scratch folder. Execution in a git repo happens in a worktree, `<repo>.jot/<id>-<slug>`, on branch `jot/<id>-<slug>`. The agent commits there and never pushes. You review and merge.
 - **No conflicts:** a claim is an atomic conditional update under `BEGIN IMMEDIATE` with a lease that the runner heartbeats. Two agents can never hold the same task. Expired leases are returned to the queue by the server, or by `jot reap`.
-- **External agents:** the `jot` skill's drawdown workflow lets an interactive Claude, Codex, or Copilot session use the same protocol: `jot claim`, then `jot comment --kind plan|question|result`, then `jot release --status …`.
+- **External agents:** the `jot` skill's drawdown workflow lets an interactive Claude, Codex, or Copilot session use the same protocol: `jot claim`, then `jot comment --kind plan|question|result`, then `jot release --status …` (`needs_input` when blocked on questions).
+- **Rendering:** plans, results, descriptions, and timeline comments render as Markdown. The renderer builds DOM nodes directly and never injects HTML, so raw HTML in agent output appears as text. Links are limited to `http(s)` and `mailto`.
 - **Permissions:** plan runs are read-only (Claude: read tools only; Codex: `--sandbox read-only`; Copilot: view/grep/glob only). Execute runs have full tool access inside the workspace.
 
 ## Find and clean up

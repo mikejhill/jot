@@ -53,6 +53,7 @@ class AgentCommands:
         app.command("plan")(self.plan)
         app.command("run")(self.run)
         app.command("approve")(self.approve)
+        app.command("answer")(self.answer)
         app.command("send-back")(self.send_back)
         app.command("runs")(self.runs)
         app.command("log")(self.log)
@@ -148,6 +149,34 @@ class AgentCommands:
         """Approve a plan (answers go in --note) and execute it now."""
         self._drive(
             lambda service: service.approve(task_id, note, backend, model), json=json
+        )
+
+    def answer(
+        self,
+        task_id: int,
+        *,
+        answer: Annotated[
+            list[str] | None,
+            typer.Option(
+                "--answer",
+                "-a",
+                help="<question-event-id>=<text>; repeat per question, omit to defer",
+            ),
+        ] = None,
+        backend: BackendOption = None,
+        model: ModelOption = None,
+        json: JsonFlag = False,
+    ) -> None:
+        """Answer a needs_input task's questions and resume its run."""
+        answers: dict[int, str] = {}
+        for item in answer or []:
+            key, sep, text = item.partition("=")
+            if not sep or not key.strip().isdigit():
+                raise WorkflowError(f"--answer must be <event-id>=<text>, got {item!r}")
+            answers[int(key)] = text
+        self._drive(
+            lambda service: service.respond(task_id, answers, backend, model),
+            json=json,
         )
 
     def send_back(self, task_id: int, comment: str, *, json: JsonFlag = False) -> None:

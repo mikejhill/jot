@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import timedelta
 
 import pytest
@@ -42,12 +43,12 @@ class TestRepositories:
             "cleanup_proposals",
             "tasks_fts",
         } <= tables
-        assert db.connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert db.connection.execute("PRAGMA user_version").fetchone()[0] == 3
         assert db.connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         assert db.connection.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
         assert db.connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
         Migrations.apply(db.connection)
-        db.connection.execute("PRAGMA user_version=3")
+        db.connection.execute("PRAGMA user_version=4")
         with pytest.raises(RepositoryError, match="newer"):
             Migrations.apply(db.connection)
 
@@ -244,4 +245,49 @@ class TestMigrations:
             }
             version = database.connection.execute("PRAGMA user_version").fetchone()[0]
         assert "model" in columns
-        assert version == 2
+        assert version == 3
+
+    def test_upgrade_adds_needs_input_and_keeps_history(self, home: JotHome) -> None:
+        """A version-2 tasks table is rebuilt without losing rows or history."""
+        old = Migrations.schema().replace("'planning','needs_input',", "'planning',")
+        stamp = Clock.stamp()
+        connection = sqlite3.connect(home.database, isolation_level=None)
+        connection.executescript(old + "\nPRAGMA user_version = 2;")
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute(
+            "INSERT INTO tasks(id,title,raw_input,type,criticality,status,source,"
+            "created_at,updated_at) VALUES(1,'Health checks','note','bug','high',"
+            "'ready','cli',?,?)",
+            (stamp, stamp),
+        )
+        connection.execute("INSERT INTO labels(id,name) VALUES(1,'ops')")
+        connection.execute("INSERT INTO task_labels VALUES(1,1)")
+        connection.execute(
+            "INSERT INTO task_events(task_id,ts,actor,kind,body) "
+            "VALUES(1,?,'cli','created','{}')",
+            (stamp,),
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute("UPDATE tasks SET status='needs_input' WHERE id=1")
+        connection.close()
+        with Database.open(home.database) as database:
+            tasks = TaskRepository(database)
+            version = database.connection.execute("PRAGMA user_version").fetchone()[0]
+            assert version == 3
+            assert tasks.get(1).labels == ["ops"]
+            assert [e.kind for e in tasks.events.for_task(1)] == [EventKind.CREATED]
+            assert tasks.query(TaskQuery(q="health"))[0].id == 1
+            database.connection.execute(
+                "UPDATE tasks SET status='needs_input' WHERE id=1"
+            )
+            assert tasks.get(1).status is Status.NEEDS_INPUT
+            fresh = tasks.create(Task(title="after upgrade"))
+            assert tasks.query(TaskQuery(q="upgrade"))[0].id == fresh.id
+            assert database.connection.execute("PRAGMA foreign_keys").fetchone()[0]
+
+    def test_upgrade_skips_when_already_applied(self, home: JotHome) -> None:
+        """A concurrent opener that already upgraded is not upgraded twice."""
+        with Database.open(home.database) as database:
+            Migrations._upgrade(database.connection, 3, "SELECT missing_table();")
+            version = database.connection.execute("PRAGMA user_version").fetchone()[0]
+        assert version == 3

@@ -111,6 +111,31 @@ class TestWorkflow:
         with pytest.raises(WorkflowError):
             Workflow.validate(Status.READY, wrong, flow)
 
+    def test_needs_input_edges(self) -> None:
+        """Running phases park in needs_input and resume, block, or send back."""
+        for flow, running in (
+            (Flow.PLANNED, {Status.PLANNING, Status.EXECUTING}),
+            (Flow.DIRECT, {Status.EXECUTING}),
+        ):
+            for phase in running:
+                Workflow.validate(phase, Status.NEEDS_INPUT, flow)
+                Workflow.validate(Status.NEEDS_INPUT, phase, flow)
+            for target in (Status.READY, Status.BLOCKED, Status.WONT_DO):
+                Workflow.validate(Status.NEEDS_INPUT, target, flow)
+            Workflow.validate(
+                Status.BLOCKED, Status.NEEDS_INPUT, flow, resume=Status.NEEDS_INPUT
+            )
+            for current, target in (
+                (Status.READY, Status.NEEDS_INPUT),
+                (Status.AWAITING_APPROVAL, Status.NEEDS_INPUT),
+                (Status.NEEDS_INPUT, Status.REVIEW),
+                (Status.NEEDS_INPUT, Status.AWAITING_APPROVAL),
+            ):
+                with pytest.raises(WorkflowError):
+                    Workflow.validate(current, target, flow)
+        with pytest.raises(WorkflowError):
+            Workflow.validate(Status.NEEDS_INPUT, Status.PLANNING, Flow.DIRECT)
+
     def test_blocked_and_rework(self, db: Database) -> None:
         """Blocked tasks resume exactly where they stopped; review allows rework."""
         workflow = Workflow(db)

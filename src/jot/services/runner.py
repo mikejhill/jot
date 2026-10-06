@@ -19,10 +19,12 @@ from jot.agents.base import (
     AgentMode,
     Json,
     JsonObject,
+    JsonValue,
     RunRequest,
 )
 from jot.agents.registry import BackendRegistry
-from jot.core.models import Clock, EventKind, Flow, Run, Status
+from jot.core.models import Clock, EventBody, EventKind, Flow, Run, Status
+from jot.core.questions import Questions
 from jot.core.workflow import Workflow
 from jot.db.repository import ProjectRepository, RunRepository, TaskRepository
 from jot.exceptions import AppError, WorkflowError
@@ -32,7 +34,7 @@ from jot.services.workspace import GitWorkspaces, Workspace
 
 if TYPE_CHECKING:
     from jot.config import Config, JotHome
-    from jot.core.models import Task
+    from jot.core.models import Task, TaskEvent
     from jot.db.connection import Database
     from jot.services.bus import EventBus
 
@@ -49,20 +51,64 @@ HISTORY_KINDS = {
     EventKind.RESULT,
 }
 
-PLAN_INSTRUCTIONS = """## Your job now: PLAN (read-only)
+QUESTION_FORMAT = """{"id": "q1", "text": "<one question for the owner>",
+  "choices": ["<optional suggested answer>", ...]}"""
+MAX_QUESTIONS = 10
+MAX_CHOICES = 8
+
+PLAN_INSTRUCTIONS = f"""## Your job now: PLAN (read-only)
 Investigate the task and the working directory without changing anything.
 Then reply with ONLY a JSON object (no code fences):
-{"summary": "<one paragraph refined understanding>",
+{{"summary": "<one paragraph refined understanding>",
  "plan": "<markdown: numbered steps, files to touch, verification, rollback>",
- "questions": ["<open question for the owner>", ...]}
-Use an empty questions list when nothing blocks execution."""
+ "questions": [{QUESTION_FORMAT}, ...]}}
+Use an empty questions list when nothing blocks execution. Questions pause the
+task for the owner; their answers come back to you to finish the plan."""
 
-EXECUTE_INSTRUCTIONS = """## Your job now: EXECUTE
+EXECUTE_INSTRUCTIONS = f"""## Your job now: EXECUTE
 Carry out the task (following the approved plan and the owner's answers, if any)
 in the current working directory. Verify your work (tests, lint, or a check that
 fits the task). If this is a git repository, commit your changes on the current
 branch with a clear message; never push and never switch branches. Finish with a
-short markdown summary: what changed, how it was verified, and any follow-ups."""
+short markdown summary: what changed, how it was verified, and any follow-ups.
+If you cannot continue without the owner's input, stop and reply with ONLY a
+JSON object (no code fences) instead; you will be resumed in the same working
+directory with their answers:
+{{"summary": "<markdown: progress so far>", "questions": [{QUESTION_FORMAT}, ...]}}"""
+
+CONTINUE_INSTRUCTIONS = """## The owner answered your questions
+Continue the same {phase} using these answers. An unanswered question means the
+owner leaves it to your judgement. Ask again only if something still blocks you.
+
+{pairs}"""
+
+
+@dataclass(frozen=True, slots=True)
+class Question:
+    """One structured question from an agent, with optional suggested answers."""
+
+    id: str
+    text: str
+    choices: tuple[str, ...] = ()
+
+    @classmethod
+    def parse_all(cls, value: JsonValue | None) -> tuple[Question, ...]:
+        """Accept question objects or plain strings; drop blanks; cap the counts."""
+        if not isinstance(value, list):
+            return ()
+        result: list[Question] = []
+        for item in value:
+            data = Json.obj(item)
+            text = (Json.text(item) or Json.text(data.get("text"))).strip()
+            if not text:
+                continue
+            raw = data.get("choices")
+            choices = (
+                [Json.text(c).strip() for c in raw] if isinstance(raw, list) else []
+            )
+            qid = Json.text(data.get("id")).strip() or f"q{len(result) + 1}"
+            result.append(cls(qid, text, tuple(c for c in choices if c)[:MAX_CHOICES]))
+        return tuple(result[:MAX_QUESTIONS])
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,7 +117,7 @@ class PlanOutcome:
 
     summary: str
     plan: str
-    questions: tuple[str, ...]
+    questions: tuple[Question, ...]
 
     @classmethod
     def parse(cls, text: str) -> PlanOutcome:
@@ -80,14 +126,31 @@ class PlanOutcome:
             data = AgentBackend.parse_json_object(text)
         except AgentError:
             return cls(summary="", plan=text.strip(), questions=())
-        questions = data.get("questions")
         return cls(
             summary=Json.text(data.get("summary")),
             plan=Json.text(data.get("plan")) or text.strip(),
-            questions=tuple(Json.text(q) for q in questions if Json.text(q))
-            if isinstance(questions, list)
-            else (),
+            questions=Question.parse_all(data.get("questions")),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class PauseOutcome:
+    """Execute-phase output that stops to ask the owner questions."""
+
+    summary: str
+    questions: tuple[Question, ...]
+
+    @classmethod
+    def parse(cls, text: str) -> PauseOutcome | None:
+        """Return the pause request, or None when the run finished normally."""
+        try:
+            data = AgentBackend.parse_json_object(text)
+        except AgentError:
+            return None
+        questions = Question.parse_all(data.get("questions"))
+        if not questions:
+            return None
+        return cls(Json.text(data.get("summary")), questions)
 
 
 class RunService:
@@ -168,6 +231,50 @@ class RunService:
         task = self.workflow.move(task_id, Status.READY, actor="owner")
         self._publish_task(task_id)
         return task
+
+    async def respond(
+        self,
+        task_id: int,
+        answers: dict[int, str],
+        backend: str | None = None,
+        model: str | None = None,
+    ) -> Run:
+        """Save the owner's answers and resume the phase that asked.
+
+        Answers map question event ids to text; blank or missing answers leave
+        the question to the agent's judgement.
+
+        Raises:
+            WorkflowError: The task is not waiting on input, or an id is not one
+                of its open questions.
+        """
+        task = self.tasks.get(task_id)
+        if task.status is not Status.NEEDS_INPUT:
+            raise WorkflowError(f"Task {task_id} is {task.status}, not needs_input")
+        events = self.tasks.events.for_task(task_id)
+        questions = {q.id: q for q in Questions.latest(events)}
+        unknown = sorted(set(answers) - set(questions))
+        if unknown:
+            raise WorkflowError(
+                f"Not open questions on task {task_id}: "
+                + ", ".join(str(i) for i in unknown)
+            )
+        with self.db.write():
+            for question_id, text in answers.items():
+                if text.strip():
+                    self.tasks.audit(
+                        task_id,
+                        EventKind.ANSWER,
+                        {
+                            "text": text.strip(),
+                            "question_id": question_id,
+                            "question": questions[question_id].body.get("text"),
+                        },
+                        actor="owner",
+                    )
+        resume = Questions.resume_status(events)
+        phase = AgentMode.EXECUTE if resume is Status.EXECUTING else AgentMode.PLAN
+        return self._launch(task, phase, backend, self.workflow.flow_for(task), model)
 
     async def cancel(self, run_id: int) -> None:
         """Stop a running run; its task lease is released by the run itself.
@@ -359,29 +466,74 @@ class RunService:
 
     def _prompt(self, task: Task, phase: AgentMode, workspace: Workspace) -> str:
         """Compose task details, history, and phase instructions."""
+        events = self.tasks.events.for_task(task.id)
         history = [
-            f"- [{e.ts:%Y-%m-%d %H:%M}] {e.kind} by {e.actor}: {e.body.get('text', '')}"
-            for e in self.tasks.events.for_task(task.id)
+            f"- [{e.ts:%Y-%m-%d %H:%M}] {self._history_line(e)}"
+            for e in events
             if e.kind in HISTORY_KINDS and e.body.get("text")
         ]
         location = f"Working directory: {workspace.cwd}"
         if workspace.branch:
             location += f" (git worktree on branch {workspace.branch})"
-        return "\n\n".join(
-            [
-                f"# Task {task.id}: {task.title}",
-                f"Project: {self._slug(task) or '(none)'} | Type: {task.type} | "
-                f"Criticality: {task.criticality} | Labels: {', '.join(task.labels)}",
-                f"## Description\n\n{task.description or '(none)'}",
-                f"## Original note\n\n{task.raw_input}",
-                "## History\n\n" + ("\n".join(history) or "(none)"),
-                location,
-                PLAN_INSTRUCTIONS if phase is AgentMode.PLAN else EXECUTE_INSTRUCTIONS,
-            ]
+        sections = [
+            f"# Task {task.id}: {task.title}",
+            f"Project: {self._slug(task) or '(none)'} | Type: {task.type} | "
+            f"Criticality: {task.criticality} | Labels: {', '.join(task.labels)}",
+            f"## Description\n\n{task.description or '(none)'}",
+            f"## Original note\n\n{task.raw_input}",
+            "## History\n\n" + ("\n".join(history) or "(none)"),
+            location,
+            PLAN_INSTRUCTIONS if phase is AgentMode.PLAN else EXECUTE_INSTRUCTIONS,
+        ]
+        resumed = self._continuation(events, phase)
+        if resumed:
+            sections.append(resumed)
+        return "\n\n".join(sections)
+
+    @staticmethod
+    def _history_line(event: TaskEvent) -> str:
+        """Render one history event, linking answers to their questions."""
+        text = event.body.get("text")
+        if event.kind is EventKind.ANSWER and event.body.get("question"):
+            return f'answer by {event.actor} to "{event.body["question"]}": {text}'
+        line = f"{event.kind} by {event.actor}: {text}"
+        choices = Questions.choices(event)
+        return f"{line} (choices: {' | '.join(choices)})" if choices else line
+
+    @staticmethod
+    def _continuation(events: list[TaskEvent], phase: AgentMode) -> str:
+        """Pair the latest questions with answers when resuming from needs_input."""
+        moves = [e for e in events if e.kind is EventKind.STATUS]
+        if not moves or moves[-1].body.get("from") != Status.NEEDS_INPUT:
+            return ""
+        answers = Questions.answers(events)
+        pairs = "\n".join(
+            f"- Q: {q.body.get('text')}\n  A: "
+            + (answers.get(q.id) or "(no answer; use your judgement)")
+            for q in Questions.latest(events)
         )
+        name = "plan" if phase is AgentMode.PLAN else "execution"
+        return CONTINUE_INSTRUCTIONS.format(phase=name, pairs=pairs or "(none)")
+
+    def _record_questions(
+        self, run: Run, questions: tuple[Question, ...], actor: str
+    ) -> None:
+        """Store each question with its id, choices, and the asking run."""
+        for question in questions:
+            self.tasks.audit(
+                run.task_id,
+                EventKind.QUESTION,
+                {
+                    "text": question.text,
+                    "qid": question.id,
+                    "choices": list(question.choices),
+                    "run_id": run.id,
+                },
+                actor=actor,
+            )
 
     def _record_plan(self, run: Run, text: str) -> tuple[str, Status]:
-        """Store plan and questions as events; next status awaits approval."""
+        """Store plan and questions; questions wait for input, else approval."""
         outcome = PlanOutcome.parse(text)
         actor = f"agent:{run.backend}"
         with self.db.write():
@@ -398,18 +550,32 @@ class RunService:
                 {"text": outcome.plan, "run_id": run.id},
                 actor=actor,
             )
-            for question in outcome.questions:
-                self.tasks.audit(
-                    run.task_id, EventKind.QUESTION, {"text": question}, actor=actor
-                )
-        return outcome.summary or outcome.plan[:500], Status.AWAITING_APPROVAL
+            self._record_questions(run, outcome.questions, actor)
+        target = Status.NEEDS_INPUT if outcome.questions else Status.AWAITING_APPROVAL
+        return outcome.summary or outcome.plan[:500], target
 
     async def _record_result(
         self, run: Run, result: AgentEvent, workspace: Workspace
     ) -> tuple[str, Status]:
-        """Store the execution summary and diffstat; next status is review."""
+        """Store the execution summary and diffstat; next status is review.
+
+        An execution that stops with questions records them and waits for input.
+        """
+        actor = f"agent:{run.backend}"
+        paused = PauseOutcome.parse(result.text)
+        if paused is not None:
+            summary = paused.summary or "Paused with questions for the owner"
+            with self.db.write():
+                self.tasks.audit(
+                    run.task_id,
+                    EventKind.COMMENT,
+                    {"text": summary, "run_id": run.id},
+                    actor=actor,
+                )
+                self._record_questions(run, paused.questions, actor)
+            return summary[:2000], Status.NEEDS_INPUT
         diffstat = await self.git.diffstat(workspace)
-        body: dict[str, str | int | float | bool | None] = {
+        body: EventBody = {
             "text": result.text,
             "run_id": run.id,
             "branch": workspace.branch,
@@ -417,9 +583,7 @@ class RunService:
             "diffstat": diffstat,
         }
         with self.db.write():
-            self.tasks.audit(
-                run.task_id, EventKind.RESULT, body, actor=f"agent:{run.backend}"
-            )
+            self.tasks.audit(run.task_id, EventKind.RESULT, body, actor=actor)
         return result.text[:2000], Status.REVIEW
 
     def _slug(self, task: Task) -> str | None:

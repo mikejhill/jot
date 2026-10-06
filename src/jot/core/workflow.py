@@ -38,7 +38,11 @@ class Workflow:
     def validate(
         current: Status, target: Status, flow: Flow, *, resume: Status | None = None
     ) -> None:
-        """Reject skipped gates; blocked tasks resume at the recorded previous state."""
+        """Reject skipped gates; blocked tasks resume at the recorded previous state.
+
+        A running phase may park in needs_input when the agent has questions;
+        answering resumes the run phase (planning in planned flow, or executing).
+        """
         sequence = (
             Status.INBOX,
             Status.READY,
@@ -57,18 +61,24 @@ class Workflow:
                 Status.DONE,
             )
         edges = dict(pairwise(sequence))
+        running = {Status.PLANNING, Status.EXECUTING} & set(sequence)
         valid = edges.get(current) == target
+        if target == Status.NEEDS_INPUT:
+            valid = current in running
+        if current == Status.NEEDS_INPUT:
+            valid = target in running
         if current == Status.BLOCKED:
             valid = target == resume
         if current in {Status.DONE, Status.WONT_DO}:
             valid = target == Status.ARCHIVED
-        if current in sequence[:-1] or current == Status.BLOCKED:
+        if current in {*sequence[:-1], Status.BLOCKED, Status.NEEDS_INPUT}:
             valid = valid or target in {Status.BLOCKED, Status.WONT_DO, Status.ARCHIVED}
         if current in {
             Status.REVIEW,
             Status.AWAITING_APPROVAL,
             Status.PLANNING,
             Status.EXECUTING,
+            Status.NEEDS_INPUT,
         } and (target == Status.READY):
             valid = True
         if current == target or not valid:
