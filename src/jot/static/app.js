@@ -281,11 +281,29 @@ class App extends Component {
       ${this.renderQuestions(t, d)}
       ${result && html`<h4>Latest result</h4>${markdown(result.body.text)}${result.body.branch && html`<small>Branch: ${result.body.branch}</small>`}`}`;
   }
+  static eventSummary(event) {
+    // One readable line for system events; null when the event has prose to show.
+    const b = event.body;
+    switch (event.kind) {
+      case 'created': return `Captured from ${b.source || 'unknown'}`;
+      case 'status': return b.action === 'soft_delete' ? 'Deleted' : `${human(b.from)} → ${human(b.to)}${b.action ? ` (${human(b.action)})` : ''}`;
+      case 'run_log': return `Run #${b.run_id}${b.status ? ` ${human(b.status)}` : ''}${b.action ? ` · ${human(b.action)}` : ''}`;
+      case 'enriched':
+        if (b.action === 'label_add') return `Label added: ${b.label}`;
+        if (b.action === 'label_remove') return `Label removed: ${b.label}`;
+        if (b.action === 'edit') return `Edited ${String(b.fields || '').split(',').map(human).join(', ')}`;
+        if (b.backend) return `Enriched by ${b.backend}${b.model && b.model !== 'default' ? `/${b.model}` : ''}${b.confidence !== undefined ? ` · confidence ${b.confidence}` : ''}`;
+        return null;
+      default: return null;
+    }
+  }
   renderEventBody(event) {
+    const summary = App.eventSummary(event);
+    if (summary) return html`<p class="event-summary">${summary}</p>`;
     const {text, ...rest} = event.body;
-    const extras = Object.entries(rest).filter(([, v]) => v !== null && v !== '' && !(Array.isArray(v) && !v.length));
-    return html`${text !== undefined && (markdownKinds.has(event.kind) ? markdown(text) : html`<pre>${String(text)}</pre>`)}
-      ${extras.length > 0 && html`<pre>${extras.map(([k,v]) => `${human(k)}: ${Array.isArray(v) ? v.join(' | ') : v}`).join('\n')}</pre>`}`;
+    const extras = Object.entries(rest).filter(([k, v]) => v !== null && v !== '' && k !== 'run_id' && !(Array.isArray(v) && !v.length));
+    return html`${text !== undefined && App.renderAgentText(String(text))}
+      ${extras.length > 0 && html`<p class="event-meta">${extras.map(([k,v]) => html`<span>${human(k)}: <b>${Array.isArray(v) ? v.join(' | ') : String(v)}</b></span>`)}</p>`}`;
   }
   renderExpanded(t, d) {
     return html`<tr class="expanded-row"><td></td><td colspan="6"><div class="expanded">
@@ -380,6 +398,25 @@ class App extends Component {
     if (usage.premium_requests !== null && usage.premium_requests !== undefined) parts.push(html`<span>premium requests <b>${n(usage.premium_requests)}</b></span>`);
     return parts.length ? parts : [html`<span class="muted">tokens not reported</span>`];
   }
+  static structured(text) {
+    // Plan runs reply with {"summary", "plan", "questions"} JSON; detect it.
+    const trimmed = text.trim().replace(/^```(?:json)?\s*|\s*```$/g, '');
+    if (!trimmed.startsWith('{')) return null;
+    try {
+      const data = JSON.parse(trimmed);
+      return data && typeof data === 'object' && ['summary', 'plan', 'questions'].some(k => k in data) ? data : null;
+    } catch { return null; }
+  }
+  static renderAgentText(text) {
+    const data = App.structured(text);
+    if (!data) return markdown(text);
+    const questions = Array.isArray(data.questions) ? data.questions.map(q => typeof q === 'string' ? q : q?.text).filter(Boolean) : [];
+    return html`<div class="structured">
+      ${data.summary && html`<div class="structured-summary">${markdown(String(data.summary))}</div>`}
+      ${data.plan && html`<h5>Plan</h5>${markdown(String(data.plan), 'plan')}`}
+      ${questions.length > 0 && html`<h5>Questions</h5><ol>${questions.map(q => html`<li>${markdown(String(q))}</li>`)}</ol>`}
+    </div>`;
+  }
   static logBlocks(entries) {
     // Group consecutive tool/thinking steps so they collapse as one block.
     const blocks = []; let group = null; let lastText = null;
@@ -404,12 +441,12 @@ class App extends Component {
         const label = [tools && `${tools} tool call${tools > 1 ? 's' : ''}`, thoughts && `${thoughts} thinking`].filter(Boolean).join(' · ');
         return html`<details class="activity"><summary>${label}</summary>${block.items.map(i => i.kind === 'tool'
           ? html`<pre class="log tool">${i.text}</pre>`
-          : html`<div class="log thinking">${markdown(i.text)}</div>`)}</details>`;
+          : html`<div class="log thinking">${App.renderAgentText(i.text)}</div>`)}</details>`;
       }
       const e = block.entry;
       if (block.type === 'usage') return html`<div class=${'usage' + (e.text === 'total' ? ' total' : '')}>${e.text === 'total' ? html`<strong>Run total</strong>` : null}${e.model ? html`<span class="pill">${e.model}</span>` : null}${App.usageParts(e.usage || {})}</div>`;
       if (block.type === 'error') return html`<div class="log error">${e.text}</div>`;
-      return html`<div class=${'agent-text ' + block.type}>${markdown(e.text)}</div>`;
+      return html`<div class=${'agent-text ' + block.type}>${App.renderAgentText(e.text)}</div>`;
     })}</div>`;
   }
   renderProjects() {

@@ -130,15 +130,31 @@ test('needs_input shows one input per question and posts answers', async () => {
   assert.deepEqual(calls, [['/api/tasks/1/answers', {answers:[{question_id:5,text:'pg'},{question_id:6,text:'Monday'}], backend:'codex', model:'astra'}]]);
 });
 
-test('timeline renders event text as markdown and other fields as details', () => {
+test('timeline renders prose as markdown and system events as one readable line', () => {
   const app = new App();
-  const md = walk(app.renderEventBody({kind:'plan', body:{text:'# Title', run_id:3, choices:[]}}));
+  const md = walk(app.renderEventBody({kind:'plan', body:{text:'# Title', run_id:3}}));
   assert(md.some(n => n.type === 'h1'));
-  assert(strings(md).includes('run id: 3'));
-  const raw = walk(app.renderEventBody({kind:'status', body:{from:'ready', to:'planning'}}));
-  assert(strings(raw).includes('from: ready\nto: planning'));
+  assert(!md.some(n => n.type === 'pre'), 'no <pre> for prose');
+  const line = text => strings(app.renderEventBody(text));
+  assert(line({kind:'status', body:{from:'ready', to:'planning', action:'claim'}}).includes('ready → planning (claim)'));
+  assert(line({kind:'run_log', body:{run_id:1, status:'running', action:'created'}}).includes('Run #1 running · created'));
+  assert(line({kind:'enriched', body:{action:'label_add', label:'idea'}}).includes('Label added: idea'));
+  assert(line({kind:'enriched', body:{backend:'claude', model:'opus', confidence:0.6}}).includes('Enriched by claude/opus · confidence 0.6'));
+  assert(line({kind:'created', body:{source:'ui'}}).includes('Captured from ui'));
   const listed = strings(app.renderEventBody({kind:'question', body:{text:'Q', choices:['a','b']}}));
-  assert(listed.includes('choices: a | b'));
+  assert(listed.includes('a | b'));
+});
+
+test('structured plan JSON renders as summary, plan and questions', () => {
+  const json = JSON.stringify({summary:'**Short** take', plan:'1. Step one', questions:['Which tone?', {text:'Who wins?'}]});
+  const nodes = walk(App.renderAgentText(json));
+  assert(nodes.some(n => n.type === 'strong'));
+  assert(nodes.some(n => n.type === 'ol'));
+  const texts = strings(App.renderAgentText(json));
+  assert(texts.includes('Who wins?') && !texts.includes('"summary"'));
+  assert.equal(App.structured('not json'), null);
+  assert.equal(App.structured('{"other": 1}'), null);
+  assert(App.structured('```json\n{"plan": "x"}\n```'));
 });
 
 test('model pickers resolve per-action choices with config defaults', () => {
