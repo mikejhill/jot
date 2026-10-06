@@ -1,6 +1,6 @@
 # Design: agent settings (harnesses, models, pins, loadouts)
 
-Covers Jot tasks #11 (backend and model for every action, pins, "auto"), #13 (harnesses as configurable plugins, with a Settings page), and #21 (choosing which skills, MCP connectors, and plugins load in runs). Status: **proposal, awaiting owner approval**.
+Covers Jot tasks #11 (backend and model for every action, pins, "auto"), #13 (harnesses as configurable plugins, with a Settings page), and #21 (choosing which skills, MCP connectors, and plugins load in runs). Status: **approved 2026-10-06** (decisions below).
 
 ## Goals
 
@@ -61,7 +61,7 @@ model = "opus"
 actions = ["plan"]
 ```
 
-**Resolution order for a run:** the explicit pick (UI, CLI, or pin), then a task override, then a project override, then `[actions]` with the harness's `models.default`. Auto applies when you pick it. A model that violates the harness policy is rejected with a clear error.
+**Resolution order for a run:** the explicit pick (UI, CLI, or pin), then `[actions]` with the harness's `models.default`. Choosing **Auto** runs the LLM router (see Decisions). A model that violates the harness policy is rejected with a clear error.
 
 Settings writes `config.toml` with `tomlkit`, so comments and formatting survive edits.
 
@@ -100,9 +100,14 @@ A **Discover** button runs one cheap session per harness and lists what's actual
 
 Each slice ships with unit, UI, and browser tests.
 
-## Open questions for the owner
+## Decisions (owner, 2026-10-06)
 
-1. **"Auto".** (a) An alias for "use the action's default" (simplest). (b) **Rules:** a small ordered rule list in config, e.g. `criticality = "critical" → claude/opus` or `type = "chore" → codex/luna`, falling back to the default. (c) An LLM router picks per task (costs a call; least predictable). **Recommendation: (b), with (c) possible later.**
-2. **Pins.** Global with an optional action filter (proposed), or separate per action?
-3. **Defaults for run loadouts.** Lean by default (no account connectors or skills unless enabled; cheapest and most predictable), or "everything" by default (today's behavior) with opt-out? **Recommendation: lean, with the repo's project instructions on.**
-4. **Project overrides.** Should projects be able to override harness, model, or loadout (e.g. the jot repo always gets the `python-development` skill)? **Recommendation: yes, harness and loadout only.**
+1. **Auto = LLM router.** When a picker is set to Auto, Jot makes one lean structured call (harness and model from `[actions] router`, default the triage harness) with:
+   - the task (title, type, criticality, labels, description excerpt),
+   - the action, and
+   - the candidates: enabled harnesses × allowed models, plus pins.
+
+   Routing guidance comes from a new editable `instructions/routing.md` (e.g. "use opus for critical planning, luna for chores"). The router returns `{harness, model, reason}`. Jot validates the choice against model policy and falls back to the action default on failure. The choice and reason are recorded on the run (a `routing` event) and shown on the run card, and router usage is logged like any other call.
+2. **Lean loadouts by default.** Plan, execute, and assist runs load no account connectors, skills, or plugins unless enabled per harness and action. The repo's project instructions (CLAUDE.md / AGENTS.md) stay on. Triage, cleanup, and the router stay fully lean.
+3. **Pins are global** with an optional `actions` filter.
+4. **No project overrides** for now. Harness and loadout come from the harness and action configuration only. The `projects` config above is out of scope.
