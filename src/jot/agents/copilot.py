@@ -24,6 +24,13 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
 PLAN_TOOLS = "view,glob,grep,web_fetch"
+# Flags for tool-less structured calls. An empty --available-tools= is ignored
+# (all 26 tools, ~8.5k tokens, still load), so allow one harmless tool instead.
+LEAN_ARGS = (
+    "--available-tools=view",
+    "--disable-builtin-mcps",
+    "--no-custom-instructions",
+)
 
 
 class CopilotBackend(AgentBackend):
@@ -45,7 +52,7 @@ class CopilotBackend(AgentBackend):
             f"no code fences) matching this JSON Schema:\n{json.dumps(schema)}"
         )
         with tempfile.TemporaryDirectory(prefix="jot-copilot-") as scratch:
-            args = [*self._base_args(full), "--available-tools="]
+            args = [*self._base_args(full), *LEAN_ARGS]
             spec = ProcessSpec(args=tuple(args), cwd=Path(scratch))
             text = ""
             async for event in self._process.stream(spec):

@@ -140,7 +140,8 @@ class TestCopilot:
             "b": 2
         }
         args = process_script.specs[0].args
-        assert "--available-tools=" in args
+        assert "--available-tools=view" in args
+        assert "--disable-builtin-mcps" in args
         assert args[args.index("--model") + 1] == "gpt"
 
     @pytest.mark.usefixtures("process_script")
@@ -241,6 +242,8 @@ class TestClaude:
             "c": 3
         }
         assert script.options[0].tools == []
+        assert script.options[0].skills == []
+        assert "strict-mcp-config" in script.options[0].extra_args
         assert script.options[0].model == "haiku"
 
     def test_structured_text_fallback(self, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -33,6 +33,12 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping
 
 PLAN_TOOLS = ["Read", "Grep", "Glob", "WebSearch", "WebFetch"]
+# Claude Code flags for tool-less structured calls (triage, cleanup).
+LEAN_CLI_ARGS: dict[str, str | None] = {
+    "strict-mcp-config": None,  # ignore account/user MCP servers
+    "disable-slash-commands": None,  # no skills or slash commands in context
+    "no-session-persistence": None,  # don't save one-shot sessions
+}
 TOOL_DETAIL_KEYS = ("command", "file_path", "pattern", "path", "url", "query")
 
 
@@ -100,6 +106,10 @@ class ClaudeBackend(AgentBackend):
             setting_sources=[],
             output_format={"type": "json_schema", "schema": schema},
             model=self.model,
+            # Without these, account MCP connectors, skills, and slash commands
+            # still load: ~14.5k prompt tokens per call instead of ~1.2k.
+            skills=[],
+            extra_args=dict(LEAN_CLI_ARGS),
         )
         result = await self._result(prompt, options)
         if result.is_error:
