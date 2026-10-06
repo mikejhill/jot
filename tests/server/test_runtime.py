@@ -91,3 +91,31 @@ class TestRuntime:
         asyncio.run(runtime.tick())
         asyncio.run(runtime.tick())
         assert caplog.text.count("Pending enrichment failed") == 2
+
+
+class TestShutdown:
+    """Closing the bus ends live streams so the server can exit promptly."""
+
+    def test_close_ends_streams_and_future_subscriptions(self) -> None:
+        """Open streams finish, a full queue still receives the end marker."""
+
+        async def scenario() -> list[str]:
+            bus = EventBus()
+            stream = EventStream(bus, keepalive=30).messages()
+            first = await anext(stream)
+            subscription = bus.subscribe()
+            waiting = asyncio.ensure_future(anext(subscription))
+            await asyncio.sleep(0)
+            for index in range(1001):  # overflow the queue before closing
+                bus.publish(Topic.TASK, {"id": index})
+            bus.close()
+            chunks = [first, *[chunk async for chunk in stream]]
+            drained = [message async for message in subscription]
+            assert (await waiting).topic is Topic.TASK
+            assert 0 < len(drained) < 1001  # the end marker displaced one message
+            assert [message async for message in bus.subscribe()] == []
+            return chunks
+
+        chunks = asyncio.run(scenario())
+        assert chunks[0] == ": connected\n\n"
+        assert all(chunk.startswith("event: task") for chunk in chunks[1:])

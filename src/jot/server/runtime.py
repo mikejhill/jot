@@ -78,7 +78,10 @@ class EventStream:
                 if not done:
                     yield ": keepalive\n\n"
                     continue
-                message = pending.result()
+                try:
+                    message = pending.result()
+                except StopAsyncIteration:
+                    return  # bus closed: the server is shutting down
                 pending = asyncio.ensure_future(anext(subscription))
                 yield (
                     f"event: {message.topic}\n"
@@ -86,7 +89,8 @@ class EventStream:
                 )
         finally:
             pending.cancel()
-            with suppress(asyncio.CancelledError):
+            # A closed bus leaves pending finished with StopAsyncIteration.
+            with suppress(asyncio.CancelledError, StopAsyncIteration):
                 await pending
             if isinstance(subscription, AsyncGenerator):
                 await subscription.aclose()

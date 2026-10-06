@@ -35,7 +35,8 @@ class BusMessage:
 class EventBus:
     """Fan out messages to every live subscriber; slow subscribers drop messages."""
 
-    _queues: set[asyncio.Queue[BusMessage]] = field(default_factory=set)
+    _queues: set[asyncio.Queue[BusMessage | None]] = field(default_factory=set)
+    _closed: bool = False
 
     def publish(self, topic: Topic, payload: JsonObject) -> None:
         """Deliver a message to all current subscribers without blocking."""
@@ -44,12 +45,22 @@ class EventBus:
             if not queue.full():
                 queue.put_nowait(message)
 
+    def close(self) -> None:
+        """End all current and future subscriptions (server shutdown)."""
+        self._closed = True
+        for queue in tuple(self._queues):
+            if queue.full():
+                queue.get_nowait()  # make room for the end-of-stream marker
+            queue.put_nowait(None)
+
     async def subscribe(self) -> AsyncIterator[BusMessage]:
-        """Yield messages published after subscribing until the caller stops."""
-        queue: asyncio.Queue[BusMessage] = asyncio.Queue(QUEUE_SIZE)
+        """Yield messages published after subscribing until closed or stopped."""
+        if self._closed:
+            return
+        queue: asyncio.Queue[BusMessage | None] = asyncio.Queue(QUEUE_SIZE)
         self._queues.add(queue)
         try:
-            while True:
-                yield await queue.get()
+            while (message := await queue.get()) is not None:
+                yield message
         finally:
             self._queues.discard(queue)

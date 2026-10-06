@@ -54,6 +54,11 @@ class Application:
                 finally:
                     self._access.current = None
 
+    def close_streams(self) -> None:
+        """End live event streams so shutdown doesn't wait on open SSE clients."""
+        if self._access.current is not None:
+            self._access.current.bus.close()
+
     @staticmethod
     async def error(_request: Request, error: Exception) -> JSONResponse:
         """Translate expected failures into stable, human-readable JSON."""
