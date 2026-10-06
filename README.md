@@ -1,6 +1,6 @@
 # jot
 
-Lightweight task capture with agent drawdown. Jot is a local SQLite task tracker with a CLI, a web UI, and agent skills. You type a quick note, and an LLM turns it into a structured task. When you want the work done, Claude, Codex, or Copilot draws it down with conflict-free claims. It runs entirely on your machine, so it works in locked-down enterprise environments.
+Lightweight task capture with agent drawdown. Jot is a local SQLite task tracker with a CLI, a web UI, and agent skills. You type a quick note, and an LLM turns it into a structured task. When you want the work done, Claude, Codex, or Copilot draws it down with conflict-free claims. Everything runs locally; no hosted service is required.
 
 ```text
 jot add "orbit api - health check is simple ping; need to make holistic"
@@ -19,7 +19,7 @@ jot install-skills --target claude --target codex --target copilot
 jot serve --open                                        # http://127.0.0.1:8765
 ```
 
-Data lives in `JOT_HOME` (default `~/.jot`). Use a different home for work and personal; the code is shared.
+Data lives in `JOT_HOME` (default `~/.jot`). Point separate installs or contexts at different homes to keep their data apart.
 
 | Path | Purpose |
 | --- | --- |

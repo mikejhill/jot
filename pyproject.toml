@@ -3,6 +3,9 @@ name = "jot"
 version = "0.1.0"
 description = "Local SQLite task capture and conflict-free agent drawdown"
 readme = "README.md"
+authors = [
+    { name = "Mike Hill", email = "mike@mikejhill.com" }
+]
 requires-python = ">=3.13"
 dependencies = [
     "claude-agent-sdk>=0.2.163",
