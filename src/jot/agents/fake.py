@@ -11,6 +11,7 @@ from jot.agents.base import (
     AgentMode,
     JsonObject,
     RunRequest,
+    TokenUsage,
 )
 
 if TYPE_CHECKING:
@@ -46,4 +47,10 @@ class FakeBackend(AgentBackend):
         else:
             text = "Done: implemented the change."
         yield AgentEvent(AgentEventKind.TEXT, text)
+        yield AgentEvent(
+            AgentEventKind.USAGE,
+            "",
+            model=self.model or "fake-model",
+            usage=TokenUsage(input=10, output=5, cache_read=100, cache_write=1),
+        )
         yield AgentEvent(AgentEventKind.RESULT, text, session_id="fake-session")

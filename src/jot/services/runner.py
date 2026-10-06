@@ -21,6 +21,7 @@ from jot.agents.base import (
     JsonObject,
     JsonValue,
     RunRequest,
+    TokenUsage,
 )
 from jot.agents.registry import BackendRegistry
 from jot.core.models import Clock, EventBody, EventKind, Flow, Run, Status
@@ -69,7 +70,10 @@ EXECUTE_INSTRUCTIONS = f"""## Your job now: EXECUTE
 Carry out the task (following the approved plan and the owner's answers, if any)
 in the current working directory. Verify your work (tests, lint, or a check that
 fits the task). If this is a git repository, commit your changes on the current
-branch with a clear message; never push and never switch branches. Finish with a
+branch with a clear message and never switch branches. Never read or modify
+files outside the working directory (do not `cd` above it). Do not push or open a pull
+request unless the owner's instructions above say to (for example, "push the branch
+and open a PR with gh"); then do exactly that. Finish with a
 short markdown summary: what changed, how it was verified, and any follow-ups.
 If you cannot continue without the owner's input, stop and reply with ONLY a
 JSON object (no code fences) instead; you will be resumed in the same working
@@ -427,6 +431,8 @@ class RunService:
         if not configured:
             scratch = self.home.path / "workspaces" / str(task.id)
             scratch.mkdir(parents=True, exist_ok=True)
+            # Its own repository, so agents never find and commit to an enclosing one.
+            await self.git.ensure_repo(scratch)
             return Workspace(cwd=scratch)
         path = Path(configured).expanduser()
         if not path.is_dir():
@@ -453,6 +459,8 @@ class RunService:
         )
         self.logs.mkdir(parents=True, exist_ok=True)
         result = AgentEvent(AgentEventKind.RESULT, "no result", is_error=True)
+        totals = TokenUsage()
+        reported = TokenUsage()
         with (self.logs / f"{run.id}.jsonl").open("a", encoding="utf-8") as log:
             async for event in agent.run(request):
                 line: JsonObject = {
@@ -462,15 +470,32 @@ class RunService:
                     "text": event.text,
                     "ts": Clock.stamp(),
                 }
+                if event.model:
+                    line["model"] = event.model
+                if event.usage is not None:
+                    line["usage"] = event.usage.as_json()
+                    if event.text == "total":
+                        reported = reported.plus(event.usage)
+                    else:
+                        totals = totals.plus(event.usage)
                 log.write(json.dumps(line, ensure_ascii=False) + "\n")
                 log.flush()
                 self.bus.publish(Topic.RUN_LOG, line)
                 if event.kind is AgentEventKind.RESULT:
                     result = event
-        if result.session_id or result.cost_usd is not None:
-            self.runs.update(
-                run.id, {"session_id": result.session_id, "cost": result.cost_usd}
-            )
+        totals = totals.prefer(reported)
+        self.runs.update(
+            run.id,
+            {
+                "session_id": result.session_id,
+                "cost": result.cost_usd,
+                "input_tokens": totals.input,
+                "output_tokens": totals.output,
+                "cache_read_tokens": totals.cache_read,
+                "cache_write_tokens": totals.cache_write,
+                "premium_requests": totals.premium_requests,
+            },
+        )
         return result
 
     def _prompt(self, task: Task, phase: AgentMode, workspace: Workspace) -> str:

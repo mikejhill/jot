@@ -151,3 +151,23 @@ test('model pickers resolve per-action choices with config defaults', () => {
   assert.equal(input.props.placeholder, 'default (opus)');
   assert.equal(walk(app.renderDatalists()).filter(n => n.type === 'option').length, 2);
 });
+
+test('run logs render Markdown, collapse tool/thinking runs, and show per-turn usage', () => {
+  const entries = [
+    {kind:'thinking', text:'consider'}, {kind:'tool', text:'Read a.py'}, {kind:'tool', text:'Grep x'},
+    {kind:'text', text:'**Done**'}, {kind:'usage', text:'', model:'opus', usage:{input:10, output:5, cache_read:100, cache_write:null}},
+    {kind:'result', text:'**Done**'}, {kind:'error', text:'warn'},
+  ];
+  const blocks = App.logBlocks(entries);
+  assert.deepEqual(blocks.map(b => b.type), ['activity', 'text', 'usage', 'error']);
+  assert.equal(blocks[0].items.length, 3);
+  const nodes = walk(new App().renderLog(entries));
+  const details = nodes.find(n => n.type === 'details');
+  assert(details && !details.props.open, 'activity collapsed by default');
+  assert(nodes.some(n => n.type === 'strong'), 'markdown rendered');
+  const texts = nodes.flatMap(n => [n.props?.children].flat()).filter(c => typeof c === 'string');
+  assert(texts.includes('opus') && texts.includes('cache read'));
+  assert(!texts.includes('cache write'), 'unreported fields omitted');
+  const none = walk(App.usageParts({}));
+  assert(none.some(n => [n.props?.children].flat().includes('tokens not reported')));
+});

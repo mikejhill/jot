@@ -10,10 +10,11 @@ from claude_agent_sdk import (
     ClaudeSDKError,
     ResultMessage,
     TextBlock,
+    ThinkingBlock,
     ToolUseBlock,
     query,
 )
-from claude_agent_sdk.types import SystemPromptPreset
+from claude_agent_sdk.types import StreamEvent, SystemPromptPreset
 from pydantic import ValidationError
 
 from jot.agents.base import (
@@ -25,13 +26,58 @@ from jot.agents.base import (
     AgentMode,
     JsonObject,
     RunRequest,
+    TokenUsage,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Mapping
 
 PLAN_TOOLS = ["Read", "Grep", "Glob", "WebSearch", "WebFetch"]
 TOOL_DETAIL_KEYS = ("command", "file_path", "pattern", "path", "url", "query")
+
+
+class TurnUsage:
+    """Turn raw API stream events into one exact USAGE event per API turn.
+
+    The usage on streamed AssistantMessages is a snapshot from ``message_start``,
+    taken before output finishes. Each turn's ``message_delta`` stream event
+    carries the final counts, so usage is read from there. That requires
+    ``include_partial_messages``.
+    """
+
+    def __init__(self) -> None:
+        self.model: str | None = None
+
+    def observe(self, event: Mapping[str, object]) -> AgentEvent | None:
+        """Track the turn's model; return a USAGE event at its ``message_delta``."""
+        kind = event.get("type")
+        if kind == "message_start":
+            message = event.get("message")
+            if isinstance(message, dict):
+                model = message.get("model")
+                self.model = model if isinstance(model, str) else self.model
+            return None
+        usage = event.get("usage")
+        if kind != "message_delta" or not isinstance(usage, dict):
+            return None
+        return AgentEvent(
+            AgentEventKind.USAGE, "", model=self.model, usage=self.tokens(usage)
+        )
+
+    @classmethod
+    def tokens(cls, usage: Mapping[str, object]) -> TokenUsage:
+        """Map Anthropic usage fields onto TokenUsage."""
+        return TokenUsage(
+            input=cls.number(usage.get("input_tokens")),
+            output=cls.number(usage.get("output_tokens")),
+            cache_read=cls.number(usage.get("cache_read_input_tokens")),
+            cache_write=cls.number(usage.get("cache_creation_input_tokens")),
+        )
+
+    @staticmethod
+    def number(value: object) -> int | None:
+        """Return ``value`` if it is an int (not a bool)."""
+        return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 class ClaudeBackend(AgentBackend):
@@ -72,13 +118,24 @@ class ClaudeBackend(AgentBackend):
         """Stream a Claude Code agent run in the request's working directory."""
         options = self._run_options(request)
         final: AgentEvent | None = None
+        turns = TurnUsage()
         try:
             # Drain the SDK generator fully; leaving early breaks its shutdown.
             async for message in query(prompt=request.prompt, options=options):
-                if isinstance(message, AssistantMessage):
+                if isinstance(message, StreamEvent):
+                    usage = turns.observe(message.event)
+                    if usage is not None:
+                        yield usage
+                elif isinstance(message, AssistantMessage):
                     for event in self._assistant_events(message):
                         yield event
                 elif isinstance(message, ResultMessage):
+                    yield AgentEvent(
+                        AgentEventKind.USAGE,
+                        "total",
+                        model=turns.model,
+                        usage=TurnUsage.tokens(message.usage or {}),
+                    )
                     final = AgentEvent(
                         AgentEventKind.RESULT,
                         message.result or "",
@@ -100,6 +157,8 @@ class ClaudeBackend(AgentBackend):
             system_prompt=system,
             setting_sources=["project"],
             model=request.model or self.model,
+            # Needed for message_delta events, which carry each turn's final usage.
+            include_partial_messages=True,
         )
         if request.mode is AgentMode.PLAN:
             common.allowed_tools = list(PLAN_TOOLS)
@@ -116,6 +175,8 @@ class ClaudeBackend(AgentBackend):
         for block in message.content:
             if isinstance(block, TextBlock) and block.text.strip():
                 events.append(AgentEvent(AgentEventKind.TEXT, block.text))
+            elif isinstance(block, ThinkingBlock) and block.thinking.strip():
+                events.append(AgentEvent(AgentEventKind.THINKING, block.thinking))
             elif isinstance(block, ToolUseBlock):
                 events.append(AgentEvent(AgentEventKind.TOOL, self._describe(block)))
         return events

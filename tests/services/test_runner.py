@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from jot.agents.base import AgentEvent, AgentEventKind, RunRequest
+from jot.agents.base import AgentEvent, AgentEventKind, RunRequest, TokenUsage
 from jot.agents.fake import FakeBackend
 from jot.config import Config, JotHome
 from jot.core.models import EventKind, Flow, Project, Run, Status, Task
@@ -299,6 +299,73 @@ class TestPlanOutcome:
     def test_app_error_type(self) -> None:
         """Workspace errors are application errors."""
         assert issubclass(WorkspaceError, AppError)
+
+
+class TestUsage:
+    """Run logs carry per-turn usage and runs store totals."""
+
+    def test_totals_and_log(self, harness: Harness) -> None:
+        """Usage lines are logged with model and summed onto the run."""
+        task = harness.ready()
+
+        async def scenario() -> Run:
+            run = await harness.service.start(task.id, flow=Flow.DIRECT)
+            return await harness.service.wait(run.id)
+
+        run = asyncio.run(scenario())
+        assert (run.input_tokens, run.output_tokens) == (10, 5)
+        assert (run.cache_read_tokens, run.cache_write_tokens) == (100, 1)
+        assert run.premium_requests is None
+        usage = [
+            line for line in harness.service.log(run.id) if line["kind"] == "usage"
+        ]
+        assert usage[0]["model"] == "fake-model"
+        assert usage[0]["usage"] == {
+            "input": 10,
+            "output": 5,
+            "cache_read": 100,
+            "cache_write": 1,
+            "premium_requests": None,
+        }
+
+
+class TestReportedTotals:
+    """Provider-reported totals override summed per-turn usage."""
+
+    def test_total_event_wins(
+        self, harness: Harness, home: JotHome, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A "total" usage event sets fields it reports; others stay summed."""
+
+        async def scripted(
+            self: FakeBackend, request: RunRequest
+        ) -> AsyncIterator[AgentEvent]:
+            del self, request
+            yield AgentEvent(
+                AgentEventKind.USAGE, "", usage=TokenUsage(input=3, cache_read=9)
+            )
+            yield AgentEvent(
+                AgentEventKind.USAGE, "", usage=TokenUsage(input=4, cache_read=1)
+            )
+            yield AgentEvent(
+                AgentEventKind.USAGE, "total", usage=TokenUsage(input=8, output=50)
+            )
+            yield AgentEvent(AgentEventKind.RESULT, "done")
+
+        monkeypatch.setattr(FakeBackend, "run", scripted)
+        task = harness.ready()
+
+        async def scenario() -> Run:
+            run = await harness.service.start(task.id, flow=Flow.DIRECT)
+            return await harness.service.wait(run.id)
+
+        run = asyncio.run(scenario())
+        assert (run.input_tokens, run.output_tokens, run.cache_read_tokens) == (
+            8,
+            50,
+            10,
+        )
+        assert (home.path / "workspaces" / str(task.id) / ".git").exists()
 
 
 class TestModels:

@@ -43,12 +43,12 @@ class TestRepositories:
             "cleanup_proposals",
             "tasks_fts",
         } <= tables
-        assert db.connection.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert db.connection.execute("PRAGMA user_version").fetchone()[0] == 4
         assert db.connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         assert db.connection.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
         assert db.connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
         Migrations.apply(db.connection)
-        db.connection.execute("PRAGMA user_version=4")
+        db.connection.execute("PRAGMA user_version=5")
         with pytest.raises(RepositoryError, match="newer"):
             Migrations.apply(db.connection)
 
@@ -245,7 +245,7 @@ class TestMigrations:
             }
             version = database.connection.execute("PRAGMA user_version").fetchone()[0]
         assert "model" in columns
-        assert version == 3
+        assert version == 4
 
     def test_upgrade_adds_needs_input_and_keeps_history(self, home: JotHome) -> None:
         """A version-2 tasks table is rebuilt without losing rows or history."""
@@ -273,7 +273,7 @@ class TestMigrations:
         with Database.open(home.database) as database:
             tasks = TaskRepository(database)
             version = database.connection.execute("PRAGMA user_version").fetchone()[0]
-            assert version == 3
+            assert version == 4
             assert tasks.get(1).labels == ["ops"]
             assert [e.kind for e in tasks.events.for_task(1)] == [EventKind.CREATED]
             assert tasks.query(TaskQuery(q="health"))[0].id == 1
@@ -290,4 +290,4 @@ class TestMigrations:
         with Database.open(home.database) as database:
             Migrations._upgrade(database.connection, 3, "SELECT missing_table();")
             version = database.connection.execute("PRAGMA user_version").fetchone()[0]
-        assert version == 3
+        assert version == 4

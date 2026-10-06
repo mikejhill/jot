@@ -94,7 +94,7 @@ class App extends Component {
     super();
     this.state = {view:'Board', tasks:[], projects:[], runs:[], labels:[], filters:{sort:'priority'}, selected:[], detail:null,
       backend:'claude', picks:App.loadPicks(), config:null, preset:'open', expanded:{}, connected:false, toasts:[], instructionNames:[], instruction:'triage.md', markdown:'', instructionDirty:false,
-      proposal:null, approved:[], projectEdit:null, logs:[], busy:false, loaded:false};
+      proposal:null, approved:[], projectEdit:null, runLogs:{}, openLogs:{}, busy:false, loaded:false};
     this.refreshVersion = 0; this.detailVersion = 0; this.toastId = 0;
   }
   componentDidMount() {
@@ -114,7 +114,7 @@ class App extends Component {
     ['task','run'].forEach(topic => this.stream.addEventListener(topic, () => this.scheduleRefresh()));
     this.stream.addEventListener('run_log', e => {
       const entry = JSON.parse(e.data);
-      this.setState(s => ({logs:[...s.logs, entry].slice(-500)}));
+      this.setState(s => s.runLogs[entry.run_id] ? {runLogs:{...s.runLogs, [entry.run_id]:[...s.runLogs[entry.run_id], entry]}} : null);
       this.scheduleRefresh();
     });
     // Recover missed bus messages after queue overflow or a disconnected tab.
@@ -172,7 +172,18 @@ class App extends Component {
       const detail = await Api.request(`/tasks/${id}`);
       if (version !== this.detailVersion) return;
       this.setState({detail}, () => {if (focus) document.querySelector('.drawer-close')?.focus();});
+      detail.runs.forEach(r => this.loadLog(r.id));
     } catch (error) {this.toast(error.message);}
+  }
+  async loadLog(runId, force = false) {
+    if (this.state.runLogs[runId] && !force) return;
+    try { const lines = await Api.request(`/runs/${runId}/log`); this.setState(s => ({runLogs:{...s.runLogs, [runId]:lines}})); }
+    catch (error) { this.toast(error.message); }
+  }
+  toggleLog(runId) {
+    const open = !this.state.openLogs[runId];
+    this.setState(s => ({openLogs:{...s.openLogs, [runId]:open}}));
+    if (open) this.loadLog(runId);
   }
   closeDetail() {this.detailVersion++; this.setState({detail:null});}
   async capture(event) {
@@ -350,10 +361,56 @@ class App extends Component {
       <tbody>${tasks.map(t => html`<tr><td><input type="checkbox" aria-label=${'Select task ' + t.id} checked=${selected.includes(t.id)} onChange=${() => this.toggleSelect(t.id)}/></td><td><button class="caret" aria-label=${(expanded[t.id] ? 'Collapse' : 'Expand') + ' task ' + t.id} onClick=${() => this.toggleExpand(t.id)}>${expanded[t.id] ? '▾' : '▸'}</button><button class="text-button" onClick=${() => this.openTask(t.id)}>${t.title}</button><div class="chips">${t.labels.map(l => pill(l))}${t.needs_enrichment && t.status === 'inbox' && html`<small>enriching…</small>`}</div></td><td>${this.state.projects.find(p => p.id === t.project_id)?.name || '—'}</td><td>${pill(t.status)}</td><td>${pill(t.criticality)}</td><td><div class="row-actions">${this.rowActions(t)}</div></td><td>${date(t.updated_at)}</td></tr>${expanded[t.id] && this.renderExpanded(t, expanded[t.id])}`)}</tbody></table></div>
       ${!tasks.length && html`<p class="empty">No tasks match these filters.</p>`}</div>`;
   }
-  renderRuns(runs = this.state.runs) {
-    return html`<div class="runs">${runs.length ? [...runs].reverse().map(r => html`<article class="panel run"><div class="toolbar"><button class="text-button" onClick=${() => this.openTask(r.task_id)}>Run #${r.id} · task #${r.task_id}</button>${pill(r.status)}${pill(r.backend)}${r.model && html`<span class="pill">${r.model}</span>`}${pill(r.phase)}</div><small>${date(r.started_at)}</small><pre>${r.summary || 'Waiting for output…'}</pre>${r.branch && html`<small>Branch: ${r.branch}</small>`}
+  renderRuns(runs = this.state.runs, inDrawer = false) {
+    return html`<div class="runs">${runs.length ? [...runs].reverse().map(r => html`<article class="panel run"><div class="toolbar"><button class="text-button" onClick=${() => this.openTask(r.task_id)}>Run #${r.id} · task #${r.task_id}</button>${pill(r.status)}${pill(r.backend)}${r.model && html`<span class="pill">${r.model}</span>`}${pill(r.phase)}</div><small>${date(r.started_at)}</small>${r.summary ? markdown(r.summary) : html`<p class="muted">Waiting for output…</p>`}${r.branch && html`<small>Branch: ${r.branch}</small>`}
       ${!r.ended_at && html`<button onClick=${() => this.act(() => Api.request(`/runs/${r.id}/cancel`,'POST'))}>Cancel run</button>`}
-      ${this.state.logs.filter(l => l.run_id === r.id).map(l => html`<pre class=${'log ' + l.kind}>[${l.kind}] ${l.text}</pre>`)}</article>`) : html`<p class="empty">No runs yet. Open a ready task to plan or run it.</p>`}</div>`;
+      ${this.renderRunTotals(r)}
+      ${inDrawer || this.state.openLogs[r.id] ? this.renderLog(this.state.runLogs[r.id]) : html`<button class="text-button" onClick=${() => this.toggleLog(r.id)}>Show output</button>`}
+      ${!inDrawer && this.state.openLogs[r.id] && html`<button class="text-button" onClick=${() => this.toggleLog(r.id)}>Hide output</button>`}</article>`) : html`<p class="empty">No runs yet. Open a ready task to plan or run it.</p>`}</div>`;
+  }
+  renderRunTotals(r) {
+    const usage = {input:r.input_tokens, output:r.output_tokens, cache_read:r.cache_read_tokens, cache_write:r.cache_write_tokens, premium_requests:r.premium_requests};
+    if (Object.values(usage).every(v => v === null || v === undefined)) return null;
+    return html`<div class="usage total"><strong>Total</strong>${App.usageParts(usage)}</div>`;
+  }
+  static usageParts(usage) {
+    const n = v => Number(v).toLocaleString();
+    const parts = [['in', usage.input], ['out', usage.output], ['cache read', usage.cache_read], ['cache write', usage.cache_write]]
+      .filter(([, v]) => v !== null && v !== undefined).map(([label, v]) => html`<span>${label} <b>${n(v)}</b></span>`);
+    if (usage.premium_requests !== null && usage.premium_requests !== undefined) parts.push(html`<span>premium requests <b>${n(usage.premium_requests)}</b></span>`);
+    return parts.length ? parts : [html`<span class="muted">tokens not reported</span>`];
+  }
+  static logBlocks(entries) {
+    // Group consecutive tool/thinking steps so they collapse as one block.
+    const blocks = []; let group = null; let lastText = null;
+    for (const entry of entries) {
+      if (entry.kind === 'tool' || entry.kind === 'thinking') {
+        if (!group) { group = {type:'activity', items:[]}; blocks.push(group); }
+        group.items.push(entry); continue;
+      }
+      group = null;
+      if (entry.kind === 'result' && entry.text && entry.text.trim() === (lastText || '').trim()) continue;
+      if (entry.kind === 'text') lastText = entry.text;
+      blocks.push({type:entry.kind, entry});
+    }
+    return blocks;
+  }
+  renderLog(entries) {
+    if (!entries) return html`<p class="muted">Loading output…</p>`;
+    if (!entries.length) return html`<p class="muted">No output yet.</p>`;
+    return html`<div class="run-log">${App.logBlocks(entries).map(block => {
+      if (block.type === 'activity') {
+        const tools = block.items.filter(i => i.kind === 'tool').length, thoughts = block.items.length - tools;
+        const label = [tools && `${tools} tool call${tools > 1 ? 's' : ''}`, thoughts && `${thoughts} thinking`].filter(Boolean).join(' · ');
+        return html`<details class="activity"><summary>${label}</summary>${block.items.map(i => i.kind === 'tool'
+          ? html`<pre class="log tool">${i.text}</pre>`
+          : html`<div class="log thinking">${markdown(i.text)}</div>`)}</details>`;
+      }
+      const e = block.entry;
+      if (block.type === 'usage') return html`<div class=${'usage' + (e.text === 'total' ? ' total' : '')}>${e.text === 'total' ? html`<strong>Run total</strong>` : null}${e.model ? html`<span class="pill">${e.model}</span>` : null}${App.usageParts(e.usage || {})}</div>`;
+      if (block.type === 'error') return html`<div class="log error">${e.text}</div>`;
+      return html`<div class=${'agent-text ' + block.type}>${markdown(e.text)}</div>`;
+    })}</div>`;
   }
   renderProjects() {
     return html`<div><button class="primary" onClick=${() => this.setState({projectEdit:{}})}>＋ New project</button>
@@ -391,7 +448,7 @@ class App extends Component {
       <form onSubmit=${e => {e.preventDefault(); const {note} = formValues(e); this.approve(t.id, note);}}><label>Approval note<input name="note" placeholder="Optional approval note"/></label><button class="primary">Approve</button></form>
       <form onSubmit=${e => {e.preventDefault(); const body = formValues(e); this.act(() => Api.request(`/tasks/${t.id}/send-back`,'POST',body));}}><label>Send-back feedback<input name="comment" required placeholder="What needs to change?"/></label><button>Send back</button></form>
       <div class="toolbar"><button onClick=${() => this.act(() => Api.request(`/tasks/${t.id}/enrich`,'POST',{}))}>Re-enrich</button><select aria-label="Move task status" value="" onChange=${e => this.move(t.id,e.target.value)}><option value="">Move status…</option>${options(d.transitions)}</select><button class="danger" onClick=${async () => {if (confirm('Delete this task? Its history will be retained.')) {this.closeDetail(); await this.act(() => Api.request(`/tasks/${t.id}`,'DELETE'));}}}>Delete</button></div></section>
-      <h2>Runs & live output</h2>${this.renderRuns(d.runs)}<h2>Timeline</h2>
+      <h2>Runs & live output</h2>${this.renderRuns(d.runs, true)}<h2>Timeline</h2>
       <form onSubmit=${async e => {e.preventDefault(); const form=e.currentTarget, body=formValues(e); if (await this.act(() => Api.request(`/tasks/${t.id}/comment`,'POST',body))) form.reset();}}><label>Add a comment<textarea name="comment" required rows="2" placeholder="Answer a question or add context…"/></label><button>Post comment</button></form>
       <ol class="timeline">${[...d.events].reverse().map(event => html`<li><div class="toolbar">${pill(event.kind)}<small>${event.actor} · ${date(event.ts)}</small></div>${this.renderEventBody(event)}</li>`)}</ol>
       <details><summary>Original capture</summary><pre>${t.raw_input}</pre></details></div></aside></div>`;

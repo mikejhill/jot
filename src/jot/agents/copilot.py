@@ -16,6 +16,7 @@ from jot.agents.base import (
     Json,
     JsonObject,
     RunRequest,
+    TokenUsage,
 )
 from jot.agents.process import JsonlProcess, ProcessSpec
 
@@ -70,10 +71,33 @@ class CopilotBackend(AgentBackend):
         spec = ProcessSpec(args=tuple(args), cwd=request.cwd)
         final = ""
         session_id: str | None = None
+        model = request.model or self.model
         async for event in self._process.stream(spec):
             kind = Json.text(event.get("type"))
             data = Json.obj(event.get("data"))
-            session_id = session_id or Json.text(data.get("sessionId")) or None
+            session_id = (
+                session_id
+                or Json.text(data.get("sessionId"))
+                or Json.text(event.get("sessionId"))
+                or None
+            )
+            model = Json.text(data.get("model")) or model
+            if kind == "assistant.turn_end":
+                # The CLI reports no token counts, only the model and premium requests.
+                yield AgentEvent(
+                    AgentEventKind.USAGE, "", model=model, usage=TokenUsage()
+                )
+                continue
+            if kind == "result":
+                premium = Json.obj(event.get("usage")).get("premiumRequests")
+                if isinstance(premium, (int, float)) and not isinstance(premium, bool):
+                    yield AgentEvent(
+                        AgentEventKind.USAGE,
+                        "total",
+                        model=model,
+                        usage=TokenUsage(premium_requests=float(premium)),
+                    )
+                continue
             mapped = self._map(kind, data)
             if mapped is None:
                 continue
@@ -98,6 +122,9 @@ class CopilotBackend(AgentBackend):
         if kind == "assistant.message":
             content = Json.text(data.get("content"))
             return AgentEvent(AgentEventKind.TEXT, content) if content.strip() else None
+        if kind == "assistant.reasoning":
+            thought = Json.text(data.get("content"))
+            return AgentEvent(AgentEventKind.THINKING, thought) if thought else None
         if kind == "tool.execution_start":
             name = Json.text(data.get("toolName"))
             arguments = json.dumps(data.get("arguments"))[:200]

@@ -146,6 +146,22 @@ class ProviderBoundary:
 class TestActions:
     """Verify adapters with monkeypatched service boundaries."""
 
+    def test_run_log(self, home: JotHome, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Stored run logs are served; unknown runs are 404."""
+        monkeypatch.setattr("jot.server.runtime.RunService", FakeRunner)
+        with TestClient(create_app(home)) as client:
+            task_id = client.post("/api/tasks", json={"text": "Log it"}).json()["id"]
+            run = client.post(f"/api/tasks/{task_id}/run").json()
+            logs = home.path / "runs"
+            logs.mkdir(exist_ok=True)
+            (logs / f"{run['id']}.jsonl").write_text(
+                '{"kind": "text", "text": "hi"}\nnot json\n', encoding="utf-8"
+            )
+            assert client.get(f"/api/runs/{run['id']}/log").json() == [
+                {"kind": "text", "text": "hi"}
+            ]
+            assert client.get("/api/runs/999/log").status_code == 404
+
     def test_runs_and_enrichment(
         self, home: JotHome, monkeypatch: pytest.MonkeyPatch
     ) -> None:

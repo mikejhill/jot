@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
+import tomllib
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, override
 
@@ -16,6 +18,7 @@ from jot.agents.base import (
     Json,
     JsonObject,
     RunRequest,
+    TokenUsage,
 )
 from jot.agents.process import JsonlProcess, ProcessSpec
 
@@ -124,6 +127,9 @@ class CodexBackend(AgentBackend):
                     AgentEventKind.RESULT, detail, session_id, is_error=True
                 )
                 return
+            if kind == "turn.completed":
+                yield self._usage(Json.obj(event.get("usage")), request.model)
+                continue
             if kind != "item.completed":
                 continue
             mapped = self._map_item(Json.obj(event.get("item")))
@@ -156,9 +162,43 @@ class CodexBackend(AgentBackend):
                 else []
             )
             return AgentEvent(AgentEventKind.TOOL, "edit " + ", ".join(paths))
+        if item_type == "reasoning" and Json.text(item.get("text")).strip():
+            return AgentEvent(AgentEventKind.THINKING, Json.text(item.get("text")))
         if item_type == "error":
             return AgentEvent(AgentEventKind.ERROR, Json.text(item.get("message")))
         return None
+
+    def _usage(self, usage: JsonObject, override: str | None) -> AgentEvent:
+        """Build a USAGE event; input is reported net of cached input, like Claude."""
+        total_input = usage.get("input_tokens")
+        cached = usage.get("cached_input_tokens")
+        output = usage.get("output_tokens")
+        uncached = (
+            total_input - cached
+            if isinstance(total_input, int) and isinstance(cached, int)
+            else total_input
+        )
+        return AgentEvent(
+            AgentEventKind.USAGE,
+            "",
+            model=override or self.model or self.default_model(),
+            usage=TokenUsage(
+                input=uncached if isinstance(uncached, int) else None,
+                output=output if isinstance(output, int) else None,
+                cache_read=cached if isinstance(cached, int) else None,
+            ),
+        )
+
+    @classmethod
+    def default_model(cls) -> str:
+        """Return the model from the user's Codex config, if one is set."""
+        home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+        try:
+            with (home / "config.toml").open("rb") as stream:
+                model = tomllib.load(stream).get("model")
+        except (OSError, tomllib.TOMLDecodeError):
+            return "codex default"
+        return model if isinstance(model, str) and model else "codex default"
 
     async def _final_text(self, spec: ProcessSpec) -> str:
         """Return the last agent message of a run, or raise on failure.

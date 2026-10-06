@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from importlib.resources import files
 
 from jot.exceptions import RepositoryError
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
+ADD_COLUMN = re.compile(r"ALTER TABLE (\w+) ADD COLUMN (\w+)", re.IGNORECASE)
 TASKS_TABLE = "CREATE TABLE IF NOT EXISTS tasks ("
 
 
@@ -42,6 +44,16 @@ class Migrations:
         return {
             2: "ALTER TABLE runs ADD COLUMN model TEXT;",
             3: cls.rebuild_tasks(),  # adds the needs_input status
+            4: "".join(
+                f"ALTER TABLE runs ADD COLUMN {column};\n"
+                for column in (
+                    "input_tokens INTEGER",
+                    "output_tokens INTEGER",
+                    "cache_read_tokens INTEGER",
+                    "cache_write_tokens INTEGER",
+                    "premium_requests REAL",
+                )
+            ),
         }
 
     @classmethod
@@ -78,7 +90,8 @@ class Migrations:
                 if current < target:
                     # executescript() would commit first, so run statements singly.
                     for statement in Migrations._statements(script):
-                        connection.execute(statement)
+                        if not Migrations._already_added(connection, statement):
+                            connection.execute(statement)
                     connection.execute(f"PRAGMA user_version = {target}")
                 Migrations._check_keys(connection, target)
                 connection.execute("COMMIT")
@@ -101,6 +114,16 @@ class Migrations:
         if pending.strip():
             statements.append(pending.strip())
         return statements
+
+    @staticmethod
+    def _already_added(connection: sqlite3.Connection, statement: str) -> bool:
+        """Return True for an ``ADD COLUMN`` whose column already exists."""
+        match = ADD_COLUMN.match(statement)
+        if match is None:
+            return False
+        table, column = match.group(1), match.group(2)
+        rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
+        return any(row[1] == column for row in rows)
 
     @staticmethod
     def _check_keys(connection: sqlite3.Connection, target: int) -> None:

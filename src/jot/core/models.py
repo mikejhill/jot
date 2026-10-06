@@ -173,5 +173,10 @@ class Run(Record):
     branch: str | None = None
     summary: str | None = None
     cost: float | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cache_read_tokens: int | None = None
+    cache_write_tokens: int | None = None
+    premium_requests: float | None = None
     started_at: datetime = Field(default_factory=Clock.now)
     ended_at: datetime | None = None

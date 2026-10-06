@@ -13,8 +13,10 @@ from claude_agent_sdk import (
     ClaudeSDKError,
     ResultMessage,
     TextBlock,
+    ThinkingBlock,
     ToolUseBlock,
 )
+from claude_agent_sdk.types import StreamEvent
 from tests.agents.conftest import ProcessScript
 
 from jot.agents import claude as claude_module
@@ -26,6 +28,7 @@ from jot.agents.base import (
     AgentMode,
     JsonObject,
     RunRequest,
+    TokenUsage,
 )
 from jot.agents.claude import ClaudeBackend
 from jot.agents.codex import CodexBackend
@@ -267,25 +270,52 @@ class TestClaude:
             asyncio.run(ClaudeBackend().structured("s", "p", SCHEMA))
 
     def test_run_plan(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        """Plan runs are read-only and map text/tool blocks."""
+        """Plan runs map blocks; usage comes from message_delta, totals from result."""
         message = AssistantMessage(
             content=[
+                ThinkingBlock("hmm", "sig"),
                 TextBlock("thinking out loud"),
                 TextBlock("  "),
                 ToolUseBlock("1", "Read", {"file_path": "a.py"}),
                 ToolUseBlock("2", "Glob", {}),
             ],
             model="m",
+            usage={"input_tokens": 1, "output_tokens": 1},
         )
-        script = SdkScript([message, self.result(result="plan")])
+
+        def stream(event: dict[str, object]) -> StreamEvent:
+            return StreamEvent(uuid="u", session_id="s", event=event)
+
+        final = {
+            "input_tokens": 10,
+            "output_tokens": 124,
+            "cache_read_input_tokens": 100,
+            "cache_creation_input_tokens": 7,
+        }
+        script = SdkScript(
+            [
+                stream({"type": "message_start", "message": {"model": "m1"}}),
+                stream({"type": "content_block_delta"}),
+                message,
+                stream({"type": "message_delta", "usage": final}),
+                stream({"type": "message_delta"}),
+                self.result(result="plan"),
+            ]
+        )
         self.patch(monkeypatch, script)
         events = Collect.run(ClaudeBackend(), RunRequest("p", tmp_path, AgentMode.PLAN))
-        assert [e.text for e in events] == [
-            "thinking out loud",
-            "Read a.py",
-            "Glob",
-            "plan",
+        assert [(e.kind.value, e.text) for e in events] == [
+            ("thinking", "hmm"),
+            ("text", "thinking out loud"),
+            ("tool", "Read a.py"),
+            ("tool", "Glob"),
+            ("usage", ""),
+            ("usage", "total"),
+            ("result", "plan"),
         ]
+        assert events[4].model == "m1"
+        assert events[4].usage == TokenUsage(10, 124, 100, 7)
+        assert events[5].usage == TokenUsage()
         assert events[-1].cost_usd == 0.5
         options = script.options[0]
         assert options.permission_mode == "dontAsk"
@@ -308,6 +338,77 @@ class TestClaude:
         self.patch(monkeypatch, SdkScript([]))
         events = Collect.run(ClaudeBackend(), RunRequest("p", tmp_path, AgentMode.PLAN))
         assert events == [AgentEvent(AgentEventKind.RESULT, "", is_error=True)]
+
+
+class TestUsageAndThinking:
+    """Per-turn usage and reasoning mapping for the CLI backends."""
+
+    def test_codex(
+        self,
+        process_script: ProcessScript,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Reasoning maps to thinking; turn usage is net of cached input."""
+        process_script.events = [
+            {"type": "item.completed", "item": {"type": "reasoning", "text": "hmm"}},
+            {"type": "item.completed", "item": {"type": "reasoning", "text": " "}},
+            {
+                "type": "turn.completed",
+                "usage": {
+                    "input_tokens": 120,
+                    "cached_input_tokens": 100,
+                    "output_tokens": 7,
+                },
+            },
+        ]
+        events = Collect.run(
+            CodexBackend("gpt-x"), RunRequest("p", tmp_path, AgentMode.PLAN)
+        )
+        assert [e.kind for e in events] == [
+            AgentEventKind.THINKING,
+            AgentEventKind.USAGE,
+            AgentEventKind.RESULT,
+        ]
+        assert events[1].model == "gpt-x"
+        assert events[1].usage == TokenUsage(input=20, output=7, cache_read=100)
+        codex_home = tmp_path / "codex"
+        codex_home.mkdir()
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+        assert CodexBackend.default_model() == "codex default"
+        (codex_home / "config.toml").write_text('model = "gpt-6.1-sol"\n', "utf-8")
+        assert CodexBackend.default_model() == "gpt-6.1-sol"
+
+    def test_copilot(self, process_script: ProcessScript, tmp_path: Path) -> None:
+        """Model per turn, reasoning, and premium requests from the result."""
+        process_script.events = [
+            {"type": "assistant.message", "data": {"model": "mai", "content": "hi"}},
+            {"type": "assistant.reasoning", "data": {"content": "think"}},
+            {"type": "assistant.turn_end", "data": {}},
+            {"type": "result", "sessionId": "s9", "usage": {"premiumRequests": 2}},
+            {"type": "result", "usage": {}},
+        ]
+        events = Collect.run(
+            CopilotBackend(), RunRequest("p", tmp_path, AgentMode.PLAN)
+        )
+        kinds = [e.kind for e in events]
+        assert kinds == [
+            AgentEventKind.TEXT,
+            AgentEventKind.THINKING,
+            AgentEventKind.USAGE,
+            AgentEventKind.USAGE,
+            AgentEventKind.RESULT,
+        ]
+        assert events[2].model == "mai"
+        assert events[2].usage == TokenUsage()
+        assert events[3].usage == TokenUsage(premium_requests=2.0)
+        assert events[-1].session_id == "s9"
+
+    def test_token_usage(self) -> None:
+        """Sums keep None only where both sides are unreported."""
+        total = TokenUsage(1, None, 3).plus(TokenUsage(2, None, None, 4, 1.0))
+        assert total == TokenUsage(3, None, 3, 4, 1.0)
+        assert total.as_json()["cache_write"] == 4
 
 
 class TestRegistryAndFake:

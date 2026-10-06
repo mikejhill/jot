@@ -46,6 +46,19 @@ class GitWorkspaces:
         code, _ = await self._git(path, "rev-parse", "--is-inside-work-tree")
         return code == 0
 
+    async def ensure_repo(self, path: Path) -> None:
+        """Make ``path`` the root of its own git repository if it isn't one.
+
+        Raises:
+            WorkspaceError: git could not initialize the repository.
+        """
+        code, out = await self._git(path, "rev-parse", "--show-toplevel")
+        if code == 0 and Path(out.strip()).resolve() == path.resolve():
+            return
+        code, out = await self._git(path, "init", "-q")
+        if code != 0:
+            raise WorkspaceError(f"git init failed in {path}: {out}")
+
     async def toplevel(self, path: Path) -> Path:
         """Return the repository root containing ``path``."""
         code, out = await self._git(path, "rev-parse", "--show-toplevel")

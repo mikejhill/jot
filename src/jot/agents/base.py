@@ -40,9 +40,62 @@ class AgentEventKind(StrEnum):
     """Kinds of streamed events a run produces."""
 
     TEXT = "text"
+    THINKING = "thinking"
     TOOL = "tool"
+    USAGE = "usage"
     ERROR = "error"
     RESULT = "result"
+
+
+@dataclass(frozen=True, slots=True)
+class TokenUsage:
+    """Token counts for one model turn; None means the provider doesn't report it."""
+
+    input: int | None = None
+    output: int | None = None
+    cache_read: int | None = None
+    cache_write: int | None = None
+    premium_requests: float | None = None
+
+    def plus(self, other: TokenUsage) -> TokenUsage:
+        """Return the field-wise sum, keeping None only where both are None."""
+
+        def add[T: (int, float)](a: T | None, b: T | None) -> T | None:
+            if a is None:
+                return b
+            return a if b is None else a + b
+
+        return TokenUsage(
+            add(self.input, other.input),
+            add(self.output, other.output),
+            add(self.cache_read, other.cache_read),
+            add(self.cache_write, other.cache_write),
+            add(self.premium_requests, other.premium_requests),
+        )
+
+    def prefer(self, reported: TokenUsage) -> TokenUsage:
+        """Return ``reported`` values where present, else this (summed) usage."""
+        return TokenUsage(
+            reported.input if reported.input is not None else self.input,
+            reported.output if reported.output is not None else self.output,
+            reported.cache_read if reported.cache_read is not None else self.cache_read,
+            reported.cache_write
+            if reported.cache_write is not None
+            else self.cache_write,
+            reported.premium_requests
+            if reported.premium_requests is not None
+            else self.premium_requests,
+        )
+
+    def as_json(self) -> JsonObject:
+        """Return a JSON object with the reported fields."""
+        return {
+            "input": self.input,
+            "output": self.output,
+            "cache_read": self.cache_read,
+            "cache_write": self.cache_write,
+            "premium_requests": self.premium_requests,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +107,8 @@ class AgentEvent:
     session_id: str | None = None
     cost_usd: float | None = None
     is_error: bool = False
+    model: str | None = None
+    usage: TokenUsage | None = None
 
 
 @dataclass(frozen=True, slots=True)

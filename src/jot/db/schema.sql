@@ -43,7 +43,9 @@ CREATE TABLE IF NOT EXISTS runs (
     id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id),
     backend TEXT NOT NULL, phase TEXT NOT NULL CHECK(phase IN ('plan','execute')),
     status TEXT NOT NULL, session_id TEXT, worktree TEXT, branch TEXT, summary TEXT,
-    cost REAL, started_at TEXT NOT NULL, ended_at TEXT, model TEXT
+    cost REAL, started_at TEXT NOT NULL, ended_at TEXT, model TEXT,
+    input_tokens INTEGER, output_tokens INTEGER, cache_read_tokens INTEGER,
+    cache_write_tokens INTEGER, premium_requests REAL
 );
 CREATE TABLE IF NOT EXISTS cleanup_proposals (
     id INTEGER PRIMARY KEY, created_at TEXT NOT NULL, items TEXT NOT NULL CHECK(json_valid(items)),

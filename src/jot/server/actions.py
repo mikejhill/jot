@@ -6,6 +6,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Body
 
+from jot.agents.base import JsonObject
 from jot.core.models import Run, Task
 from jot.server.runtime import RuntimeAccess
 from jot.server.schemas import (
@@ -39,6 +40,7 @@ class ActionRoutes:
             self.router.add_api_route("/" + path, endpoint, methods=["POST"])
         self.router.add_api_route("/runs", self.runs, methods=["GET"])
         self.router.add_api_route("/runs/{run_id}", self.get_run, methods=["GET"])
+        self.router.add_api_route("/runs/{run_id}/log", self.run_log, methods=["GET"])
         self.router.add_api_route(
             "/cleanup/{proposal_id}", self.proposal, methods=["GET"]
         )
@@ -121,6 +123,12 @@ class ActionRoutes:
             for run in self._access.runtime.runs.list()
             if task_id is None or run.task_id == task_id
         ]
+
+    async def run_log(self, run_id: int) -> list[JsonObject]:
+        """Return a run's stored log lines (text, thinking, tool, usage, result)."""
+        runtime = self._access.runtime
+        runtime.runs.get(run_id)
+        return runtime.runner.log(run_id)
 
     async def get_run(self, run_id: int) -> Run:
         """Return one persisted run."""
