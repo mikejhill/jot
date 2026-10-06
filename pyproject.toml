@@ -24,7 +24,7 @@ classifiers = [
 dependencies = [
     "claude-agent-sdk>=0.2.163",
     "fastapi>=0.142.2",
-    "pydantic>=2.12.2",
+    "pydantic>=2.13.5",
     "typer>=0.27.2",
 ]
 
@@ -36,7 +36,7 @@ Issues = "https://github.com/mikejhill/jot/issues"
 jot = "jot.__main__:Application.main"
 
 [build-system]
-requires = ["uv_build>=0.11.32,<0.12.0"]
+requires = ["uv_build>=0.12.23,<0.13.0"]
 build-backend = "uv_build"
 
 [tool.ruff]
