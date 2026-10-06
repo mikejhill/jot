@@ -3,6 +3,8 @@ name = "jot"
 version = "0.1.0"
 description = "Local SQLite task capture and conflict-free agent drawdown"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "Mike Hill", email = "mike@mikejhill.com" }
 ]
