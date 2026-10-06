@@ -97,6 +97,7 @@ class TestResources:
             "/vendor/htm.mjs",
         ):
             response = client.get(path)
+            assert response.headers["cache-control"] == "no-cache"
             assert response.status_code == 200
             assert "https://" not in response.text
         assert "Capture" in client.get("/app.js").text

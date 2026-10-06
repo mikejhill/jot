@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sqlite3
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
+from typing import TYPE_CHECKING, override
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
@@ -25,6 +27,32 @@ from jot.server.actions import ActionRoutes
 from jot.server.resources import ResourceRoutes
 from jot.server.runtime import Runtime, RuntimeAccess
 from jot.server.tasks import TaskRoutes
+
+if TYPE_CHECKING:
+    from os import PathLike
+
+    from starlette.types import Scope
+
+
+class RevalidatedStaticFiles(StaticFiles):
+    """Serve the UI with ``Cache-Control: no-cache``.
+
+    Without it, browsers heuristically cache ``app.js`` and its modules and keep
+    running a stale UI after an update. ``no-cache`` still allows cheap 304s.
+    """
+
+    @override
+    def file_response(
+        self,
+        full_path: PathLike[str] | str,
+        stat_result: os.stat_result,
+        scope: Scope,
+        status_code: int = 200,
+    ) -> Response:
+        """Return the file response with a revalidation header."""
+        response = super().file_response(full_path, stat_result, scope, status_code)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
 
 
 class Application:
@@ -87,7 +115,10 @@ class Application:
         ):
             app.include_router(routes.router)
         app.mount(
-            "/", StaticFiles(directory=Path(__file__).parents[1] / "static", html=True)
+            "/",
+            RevalidatedStaticFiles(
+                directory=Path(__file__).parents[1] / "static", html=True
+            ),
         )
         return app
 
