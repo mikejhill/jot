@@ -24,11 +24,11 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "claude-agent-sdk>=0.2.163",
-    "fastapi>=0.142.2",
-    "pydantic>=2.13.5",
-    "tomlkit>=0.15.1",
-    "typer>=0.27.2",
+    "claude-agent-sdk>=0.2.168",
+    "fastapi>=0.143.3",
+    "pydantic>=2.14.1",
+    "tomlkit>=0.15.2",
+    "typer>=0.27.3",
 ]
 
 [project.urls]
@@ -39,7 +39,7 @@ Issues = "https://github.com/mikejhill/jot/issues"
 jot = "jot.__main__:Application.main"
 
 [build-system]
-requires = ["uv_build>=0.12.23,<0.13.0"]
+requires = ["uv_build>=0.13.1,<0.14.0"]
 build-backend = "uv_build"
 
 [tool.ruff]
@@ -108,10 +108,10 @@ check = { sequence = ["format-check", "lint", "typecheck", "test"], help = "Run 
 
 [dependency-groups]
 dev = [
-    "poethepoet>=0.48.0",
+    "poethepoet>=0.49.0",
     "pytest>=9.1.1",
     "pytest-cov>=7.1.0",
-    "pytest-playwright>=0.9.0",
-    "ruff>=0.16.10",
-    "ty>=0.0.84",
+    "pytest-playwright>=0.10.0",
+    "ruff>=0.17.1",
+    "ty>=0.0.89",
 ]
