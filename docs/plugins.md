@@ -124,6 +124,7 @@ A request's backend is, in order: the one the caller names, the action's route, 
 from jot.plugins.harness import SERVICE, HarnessService
 from jot.plugins.harness.api import StructuredRequest
 
+
 class TriagePlugin(Plugin):
     requires = frozenset({SERVICE})
 
