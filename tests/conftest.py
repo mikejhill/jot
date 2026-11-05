@@ -1,4 +1,4 @@
-"""Isolated data homes and database fixtures."""
+"""Isolated data homes, sessions, and command fixtures."""
 
 from __future__ import annotations
 
@@ -10,14 +10,16 @@ from uuid import uuid4
 
 import pytest
 
+from jot.app.commands import Commands
+from jot.app.session import Session
 from jot.config import JotHome
-from jot.db.connection import Database
+from jot.core.models import Origin, WriteContext
 
 TEST_ROOT = Path(__file__).resolve().parents[1] / ".tmp" / "tests"
 
 
 class ReadOnlyCleanup:
-    """Remove trees containing read-only files (git objects on Windows)."""
+    """Remove trees containing read-only files on Windows."""
 
     @staticmethod
     def retry(func: Callable[[str], object], path: str, _exc: BaseException) -> None:
@@ -28,34 +30,30 @@ class ReadOnlyCleanup:
 
 @pytest.fixture
 def tmp_path() -> Iterator[Path]:
-    """Create local test paths with inherited Windows sandbox permissions.
-
-    Python's Windows mode 0700 directories exclude the sandbox capability SID;
-    pytest's default temporary directory fixture uses that mode.
-    """
+    """Create local test paths with inherited Windows sandbox permissions."""
     path = TEST_ROOT / uuid4().hex
     path.mkdir(parents=True)
     yield path
     rmtree(path, onexc=ReadOnlyCleanup.retry)
 
 
-@pytest.fixture(autouse=True)
-def git_ceiling(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Stop git from treating test folders as part of the enclosing jot repo."""
-    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(TEST_ROOT))
-
-
 @pytest.fixture
 def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> JotHome:
-    """Initialize an isolated data home for every test."""
+    """Point JOT_HOME at an empty folder for every test."""
     monkeypatch.setenv("JOT_HOME", str(tmp_path))
-    result = JotHome.resolve()
-    result.initialize()
-    return result
+    monkeypatch.delenv("JOT_ACTOR", raising=False)
+    monkeypatch.delenv("JOT_CORRELATION_ID", raising=False)
+    return JotHome.resolve()
 
 
 @pytest.fixture
-def db(home: JotHome) -> Iterator[Database]:
-    """Open and close a fresh SQLite database."""
-    with Database.open(home.database) as database:
-        yield database
+def session(home: JotHome) -> Iterator[Session]:
+    """Open a session on the isolated home."""
+    with Session.open(home) as opened:
+        yield opened
+
+
+@pytest.fixture
+def commands(session: Session) -> Commands:
+    """Commands writing as the user through the CLI."""
+    return session.commands(WriteContext(actor="user", origin=Origin.CLI))

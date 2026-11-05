@@ -1,7 +1,3 @@
-"""Local FastAPI server and public application factory."""
+"""HTTP API and web UI server."""
 
 from __future__ import annotations
-
-from jot.server.app import create_app
-
-__all__ = ["create_app"]

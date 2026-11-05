@@ -1,129 +1,93 @@
-"""Validated HTTP request bodies and query parameters."""
+"""Request bodies for the HTTP API. Responses reuse the core records."""
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Literal
+from pydantic import Field, JsonValue
 
-from pydantic import Field
-
-from jot.core.models import Criticality, Flow, Record, Status, TaskType
-
-type Backend = str
+from jot.app.commands import JotPatch, Placement
+from jot.core.models import Metadata, Record
 
 
-class TaskFields(Record):
-    """Editable task content; omitted fields remain unchanged."""
+class CreateJot(Record):
+    """Capture a jot."""
 
-    title: str | None = Field(default=None, min_length=1)
-    description: str | None = None
-    project: str | None = None
-    project_id: int | None = None
-    labels: list[str] | None = None
-    criticality: Criticality | None = None
-    type: TaskType | None = None
-    flow: Flow | None = None
-    repo_path: str | None = None
-    due_at: datetime | None = None
-
-
-class Capture(TaskFields):
-    """Raw quick capture with optional prefilled content."""
-
-    text: str = Field(min_length=1)
-    backend: Backend | None = None
-    harness: str | None = None
-    model: str | None = None
-
-
-class TaskFilters(Record):
-    """Every repository filter plus type and priority ordering."""
-
+    title: str = ""
+    body: str = ""
+    profile: str | None = None
+    status: str | None = None
     project: str | None = None
     labels: list[str] = Field(default_factory=list)
-    statuses: list[Status] = Field(default_factory=list)
-    status: Status | None = None
-    criticality: Criticality | None = None
-    type: TaskType | None = None
-    older_than: int | None = Field(default=None, ge=0)
-    age_field: Literal["updated_at", "created_at"] = "updated_at"
-    q: str | None = None
-    include_deleted: bool = False
-    limit: int | None = Field(default=None, ge=0)
-    order: str = "id"
-    sort: Literal["priority", "updated", "created"] | None = None
+    fields: dict[str, JsonValue] = Field(default_factory=dict)
+    metadata: Metadata = Field(default_factory=dict)
 
 
-class Move(Record):
-    """Requested workflow transition."""
+class UpdateJot(JotPatch):
+    """A patch plus optional version checks."""
 
-    status: Status
+    expected_version: int | None = None
+    base_version: int | None = None
 
-
-class Comment(Record):
-    """Human feedback for comments or send-back actions."""
-
-    comment: str = Field(min_length=1)
-
-
-class RunRequest(Record):
-    """Optional run policy and backend override."""
-
-    flow: Flow | None = None
-    backend: Backend | None = None
-    harness: str | None = None
-    model: str | None = Field(default=None, max_length=200)
+    def patch(self) -> JotPatch:
+        """Return only the patch fields the client actually sent."""
+        names = set(JotPatch.model_fields) & self.model_fields_set
+        return JotPatch.model_validate({name: getattr(self, name) for name in names})
 
 
-class Approval(Record):
-    """Explicit approval with an optional note and backend."""
+class SetStatus(Record):
+    """Move to a status."""
 
-    note: str | None = None
-    backend: Backend | None = None
-    harness: str | None = None
-    model: str | None = Field(default=None, max_length=200)
+    status: str
+    expected_version: int | None = None
 
 
-class Answer(Record):
-    """The owner's reply to one question event; blank defers to the agent."""
+class ChangeLabels(Record):
+    """Add and remove labels."""
 
-    question_id: int
-    text: str = Field(default="", max_length=20000)
-
-
-class Answers(Record):
-    """Answers to a needs_input task's questions, sent back to the agent."""
-
-    answers: list[Answer] = Field(default_factory=list)
-    backend: Backend | None = None
-    harness: str | None = None
-    model: str | None = Field(default=None, max_length=200)
+    add: list[str] = Field(default_factory=list)
+    remove: list[str] = Field(default_factory=list)
+    expected_version: int | None = None
 
 
-class Enrichment(Record):
-    """Optional enrichment backend override."""
+class MoveRank(Record):
+    """Reorder a jot."""
 
-    backend: Backend | None = None
-    harness: str | None = None
-    model: str | None = Field(default=None, max_length=200)
-
-
-class Markdown(Record):
-    """Plain Markdown instruction content."""
-
-    content: str
+    placement: Placement
+    anchor: int | None = None
 
 
-class Scan(Record):
-    """Whether cleanup may consult an agent."""
+class AddComment(Record):
+    """Add a comment."""
 
-    use_agent: bool = False
-    backend: Backend | None = None
-    harness: str | None = None
-    model: str | None = Field(default=None, max_length=200)
+    body: str
+    kind: str = "comment"
+    reply_to: int | None = None
 
 
-class ApplyCleanup(Record):
-    """Only these proposal item indexes are approved."""
+class EditComment(Record):
+    """Replace a comment's body."""
 
-    approved_indexes: list[int]
+    body: str
+
+
+class LinkBody(Record):
+    """Create or remove a link."""
+
+    src: int
+    dst: int
+    rel: str = "relates"
+
+
+class CreateProject(Record):
+    """Create a project."""
+
+    slug: str
+    name: str
+    description: str = ""
+
+
+class UpdateProject(Record):
+    """Change a project."""
+
+    name: str | None = None
+    description: str | None = None
+    archived: bool | None = None

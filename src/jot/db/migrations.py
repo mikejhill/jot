@@ -1,129 +1,92 @@
-"""Versioned schema initialization and upgrades."""
+"""Versioned schema installation and upgrades."""
 
 from __future__ import annotations
 
-import re
 import sqlite3
 from importlib.resources import files
 
 from jot.exceptions import RepositoryError
 
-SCHEMA_VERSION = 5
-ADD_COLUMN = re.compile(r"ALTER TABLE (\w+) ADD COLUMN (\w+)", re.IGNORECASE)
-TASKS_TABLE = "CREATE TABLE IF NOT EXISTS tasks ("
+SCHEMA_VERSION = 1
 
 
 class Migrations:
-    """Apply known schema versions without downgrading newer databases."""
+    """Install the current schema; refuse databases this version cannot read.
+
+    Later versions add an entry to ``UPGRADES`` (target version -> script) and
+    a test that upgrades a database written by the previous version.
+    """
+
+    UPGRADES: dict[int, str] = {}  # noqa: RUF012 - filled by later schema versions
 
     @staticmethod
     def schema() -> str:
         """Return the current full schema script."""
         return files("jot.db").joinpath("schema.sql").read_text(encoding="utf-8")
 
-    @classmethod
-    def rebuild_tasks(cls) -> str:
-        """Recreate ``tasks`` from the current schema, keeping rows and ids.
-
-        SQLite cannot alter CHECK constraints, so the table is copied into a new
-        definition; re-running the idempotent schema restores indexes and triggers.
-        """
-        schema = cls.schema()
-        start = schema.index(TASKS_TABLE)
-        end = schema.index("\n);", start) + len("\n);")
-        create = schema[start:end].replace(TASKS_TABLE, "CREATE TABLE tasks_new (")
-        copy = (
-            "INSERT INTO tasks_new SELECT * FROM tasks;\n"
-            "DROP TABLE tasks;\nALTER TABLE tasks_new RENAME TO tasks;"
-        )
-        return "\n".join((create, copy, schema))
-
-    @classmethod
-    def upgrades(cls) -> dict[int, str]:
-        """Return the script that upgrades the previous version to each version."""
-        schema = cls.schema()
-        start = schema.index("CREATE TABLE IF NOT EXISTS task_events (")
-        end = schema.index("\n);", start) + len("\n);")
-        events = schema[start:end].replace(
-            "IF NOT EXISTS task_events", "task_events_new"
-        )
-        return {
-            5: "\n".join(
-                (
-                    "ALTER TABLE runs ADD COLUMN harness TEXT;",
-                    "ALTER TABLE runs ADD COLUMN loadout TEXT;",
-                    events,
-                    "INSERT INTO task_events_new SELECT * FROM task_events;",
-                    "DROP TABLE task_events;",
-                    "ALTER TABLE task_events_new RENAME TO task_events;",
-                    "CREATE INDEX events_task ON task_events(task_id, id);",
-                )
-            ),
-            2: "ALTER TABLE runs ADD COLUMN model TEXT;",
-            3: cls.rebuild_tasks(),  # adds the needs_input status
-            4: "".join(
-                f"ALTER TABLE runs ADD COLUMN {column};\n"
-                for column in (
-                    "input_tokens INTEGER",
-                    "output_tokens INTEGER",
-                    "cache_read_tokens INTEGER",
-                    "cache_write_tokens INTEGER",
-                    "premium_requests REAL",
-                )
-            ),
-        }
+    @staticmethod
+    def version(connection: sqlite3.Connection) -> int:
+        """Return the database's schema version."""
+        return int(connection.execute("PRAGMA user_version").fetchone()[0])
 
     @classmethod
     def apply(cls, connection: sqlite3.Connection) -> None:
-        """Install or upgrade the schema atomically, including on concurrent opens."""
-        version = connection.execute("PRAGMA user_version").fetchone()[0]
+        """Install or upgrade the schema atomically, safe under concurrent opens.
+
+        The version is re-read under the write lock, so when several processes
+        or requests open a new database at once, exactly one installs it.
+        """
+        cls._reject_v01(connection)
+        if cls._current(connection):
+            return
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            version = cls.version(connection)
+            if not cls._current(connection):
+                scripts = (
+                    [cls.schema()]
+                    if version == 0
+                    else [
+                        cls.UPGRADES[target]
+                        for target in range(version + 1, SCHEMA_VERSION + 1)
+                    ]
+                )
+                for script in scripts:
+                    for statement in cls.statements(script):
+                        connection.execute(statement)
+                connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            connection.execute("COMMIT")
+        except BaseException:
+            connection.execute("ROLLBACK")
+            raise
+
+    @classmethod
+    def _current(cls, connection: sqlite3.Connection) -> bool:
+        """Return True when no work is needed; refuse newer databases."""
+        version = cls.version(connection)
         if version > SCHEMA_VERSION:
             raise RepositoryError(f"Database version {version} is newer than supported")
-        if version == SCHEMA_VERSION:
-            return
-        if version == 0:
-            connection.executescript(
-                f"BEGIN IMMEDIATE;\n{cls.schema()}\n"
-                f"PRAGMA user_version = {SCHEMA_VERSION};\nCOMMIT;"
+        return version == SCHEMA_VERSION
+
+    @staticmethod
+    def _reject_v01(connection: sqlite3.Connection) -> None:
+        """Refuse a v0.1 task database with guidance."""
+        if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tasks'"
+        ).fetchone():
+            raise RepositoryError(
+                "This is a Jot v0.1 database and cannot be opened in place. "
+                "Point JOT_HOME at a new folder (a v0.1 importer is planned)."
             )
-            return
-        upgrades = cls.upgrades()
-        for target in range(version + 1, SCHEMA_VERSION + 1):
-            cls._upgrade(connection, target, upgrades[target])
 
     @staticmethod
-    def _upgrade(connection: sqlite3.Connection, target: int, script: str) -> None:
-        """Run one upgrade with foreign keys off so table rebuilds keep history.
-
-        The version is re-read under the write lock so a concurrent opener that
-        already upgraded is not upgraded twice.
-        """
-        enforced = connection.execute("PRAGMA foreign_keys").fetchone()[0]
-        connection.execute("PRAGMA foreign_keys = OFF")
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            try:
-                current = connection.execute("PRAGMA user_version").fetchone()[0]
-                if current < target:
-                    # executescript() would commit first, so run statements singly.
-                    for statement in Migrations._statements(script):
-                        if not Migrations._already_added(connection, statement):
-                            connection.execute(statement)
-                    connection.execute(f"PRAGMA user_version = {target}")
-                Migrations._check_keys(connection, target)
-                connection.execute("COMMIT")
-            except BaseException:
-                connection.execute("ROLLBACK")
-                raise
-        finally:
-            connection.execute(f"PRAGMA foreign_keys = {int(enforced)}")
-
-    @staticmethod
-    def _statements(script: str) -> list[str]:
+    def statements(script: str) -> list[str]:
         """Split a script into complete statements (trigger bodies stay whole)."""
         statements: list[str] = []
         pending = ""
         for line in script.splitlines(keepends=True):
+            if not pending and line.lstrip().startswith("--"):
+                continue
             pending += line
             if sqlite3.complete_statement(pending):
                 statements.append(pending.strip())
@@ -131,19 +94,3 @@ class Migrations:
         if pending.strip():
             statements.append(pending.strip())
         return statements
-
-    @staticmethod
-    def _already_added(connection: sqlite3.Connection, statement: str) -> bool:
-        """Return True for an ``ADD COLUMN`` whose column already exists."""
-        match = ADD_COLUMN.match(statement)
-        if match is None:
-            return False
-        table, column = match.group(1), match.group(2)
-        rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
-        return any(row[1] == column for row in rows)
-
-    @staticmethod
-    def _check_keys(connection: sqlite3.Connection, target: int) -> None:
-        """Reject an upgrade that left dangling references."""
-        if connection.execute("PRAGMA foreign_key_check").fetchone():
-            raise RepositoryError(f"Upgrade to v{target} broke foreign keys")

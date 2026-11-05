@@ -1,44 +1,83 @@
-"""Browser test fixtures: a seeded demo workspace served on a free port."""
+"""A live server on a free port and a Chromium page that fails on console errors."""
 
 from __future__ import annotations
 
-import shutil
+import socket
+import threading
+import time
 from collections.abc import Iterator
-from pathlib import Path
-from uuid import uuid4
 
 import pytest
-from playwright.sync_api import ConsoleMessage, Page
+import uvicorn
+from playwright.sync_api import Browser, ConsoleMessage, Page, sync_playwright
 
 from jot.config import JotHome
-from jot.demo import DemoServer, DemoWorkspace
-
-ROOT = Path(__file__).resolve().parents[2] / ".tmp" / "e2e"
+from jot.server.app import ApiApplication
 
 
-@pytest.fixture(scope="module")
-def server() -> Iterator[DemoServer]:
-    """Serve a freshly seeded demo workspace for one test module."""
-    home = JotHome(ROOT / uuid4().hex)
-    DemoWorkspace(home).seed()
-    with DemoServer(home) as running:
-        yield running
-    shutil.rmtree(home.path, ignore_errors=True)
+class LiveServer:
+    """Run uvicorn in a background thread for one test."""
+
+    def __init__(self, home: JotHome) -> None:
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            self.port = int(probe.getsockname()[1])
+        config = uvicorn.Config(
+            ApiApplication(home).build(), port=self.port, log_level="warning"
+        )
+        self.server = uvicorn.Server(config)
+        self.thread = threading.Thread(target=self.server.run, daemon=True)
+
+    @property
+    def url(self) -> str:
+        """Return the base URL."""
+        return f"http://127.0.0.1:{self.port}"
+
+    def __enter__(self) -> LiveServer:
+        """Start and wait until the server accepts connections."""
+        self.thread.start()
+        deadline = time.monotonic() + 10
+        while not self.server.started:
+            if time.monotonic() > deadline:  # pragma: no cover - startup failure
+                raise RuntimeError("server did not start")
+            time.sleep(0.02)
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        """Stop the server thread."""
+        self.server.should_exit = True
+        self.thread.join(timeout=10)
 
 
 @pytest.fixture
-def app(page: Page, server: DemoServer) -> Iterator[Page]:
-    """Open the app, failing the test on any console error."""
+def live(home: JotHome) -> Iterator[LiveServer]:
+    """A running server on an isolated data home."""
+    with LiveServer(home) as server:
+        yield server
+
+
+@pytest.fixture(scope="session")
+def browser() -> Iterator[Browser]:
+    """One headless Chromium for the session."""
+    with sync_playwright() as playwright:
+        chromium = playwright.chromium.launch()
+        yield chromium
+        chromium.close()
+
+
+@pytest.fixture
+def page(browser: Browser, live: LiveServer) -> Iterator[Page]:
+    """A fresh page on the live server that must log no console errors."""
+    context = browser.new_context(base_url=live.url)
+    tab = context.new_page()
     errors: list[str] = []
 
     def record(message: ConsoleMessage) -> None:
-        if message.type == "error":
+        if message.type == "error" and "409" not in message.text:
             errors.append(message.text)
 
-    page.on("console", record)
-    page.on("pageerror", lambda error: errors.append(str(error)))
-    page.set_viewport_size({"width": 1440, "height": 900})
-    page.goto(server.url)
-    page.get_by_text("Add functional health checks").first.wait_for()
-    yield page
+    tab.on("console", record)
+    tab.on("pageerror", lambda error: errors.append(str(error)))
+    yield tab
+    context.close()
     assert errors == []

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from jot.cli import CommandLine
+from jot.cli.main import CommandLine
 
 
 class Application:

@@ -1,128 +1,309 @@
-"""FastAPI composition, application lifetime, and clean HTTP error translation."""
+"""HTTP API and web UI over the shared command layer.
+
+Every route opens a short-lived session, so the server holds no state beyond
+the data home. Writes take their context from ``X-Jot-*`` headers.
+"""
 
 from __future__ import annotations
 
-import asyncio
-import os
 import sqlite3
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager, suppress
+from collections.abc import Iterator
+from importlib.resources import files
 from pathlib import Path
-from typing import TYPE_CHECKING, override
+from typing import Annotated
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Header, Query, Request
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
+from starlette.middleware.base import RequestResponseEndpoint
 
+from jot.app.commands import Commands
+from jot.app.queries import JotDetail, JotFilter, Sort
+from jot.app.session import Session
 from jot.config import JotHome
-from jot.db.connection import Database
-from jot.exceptions import (
-    AppError,
-    NotFoundError,
-    NotImplementedAppError,
-    WorkflowError,
+from jot.core.models import (
+    Comment,
+    Event,
+    Jot,
+    Link,
+    Origin,
+    Project,
+    StatusCategory,
+    WriteContext,
 )
-from jot.server.actions import ActionRoutes
-from jot.server.resources import ResourceRoutes
-from jot.server.runtime import Runtime, RuntimeAccess
-from jot.server.tasks import TaskRoutes
+from jot.core.profiles import Profile
+from jot.exceptions import AppError, ConflictError, NotFoundError
+from jot.server.schemas import (
+    AddComment,
+    ChangeLabels,
+    CreateJot,
+    CreateProject,
+    EditComment,
+    LinkBody,
+    MoveRank,
+    SetStatus,
+    UpdateJot,
+    UpdateProject,
+)
 
-if TYPE_CHECKING:
-    from os import PathLike
-
-    from starlette.types import Scope
-
-
-class RevalidatedStaticFiles(StaticFiles):
-    """Serve the UI with ``Cache-Control: no-cache``.
-
-    Without it, browsers heuristically cache ``app.js`` and its modules and keep
-    running a stale UI after an update. ``no-cache`` still allows cheap 304s.
-    """
-
-    @override
-    def file_response(
-        self,
-        full_path: PathLike[str] | str,
-        stat_result: os.stat_result,
-        scope: Scope,
-        status_code: int = 200,
-    ) -> Response:
-        """Return the file response with a revalidation header."""
-        response = super().file_response(full_path, stat_result, scope, status_code)
-        response.headers["Cache-Control"] = "no-cache"
-        return response
+WRITE_ORIGINS = frozenset({Origin.API, Origin.UI})
 
 
-class Application:
-    """Own a single server's services and local static application."""
+class LabelCount(BaseModel):
+    """A label and how many live jots carry it."""
 
-    def __init__(self, home: JotHome | None = None) -> None:
-        self._home = home or JotHome.resolve()
-        self._access = RuntimeAccess()
+    name: str
+    count: int
 
-    @asynccontextmanager
-    async def lifespan(self, app: FastAPI) -> AsyncIterator[None]:
-        """Open SQLite on the event loop and stop background work before closing it."""
-        config = self._home.initialize()
-        with Database.open(self._home.database) as db:
-            runtime = Runtime(db, self._home, config)
-            self._access.current = runtime
-            app.state.runtime = runtime
-            worker = asyncio.create_task(runtime.work())
-            try:
-                yield
-            finally:
-                worker.cancel()
-                try:
-                    with suppress(asyncio.CancelledError):
-                        await worker
-                    await runtime.runner.shutdown()
-                finally:
-                    self._access.current = None
 
-    def close_streams(self) -> None:
-        """End live event streams so shutdown doesn't wait on open SSE clients."""
-        if self._access.current is not None:
-            self._access.current.bus.close()
+class Health(BaseModel):
+    """Liveness and data-home details."""
+
+    status: str
+    home: str
+
+
+class Dependencies:
+    """Per-request dependencies, resolved by FastAPI from module-level aliases."""
 
     @staticmethod
-    async def error(_request: Request, error: Exception) -> JSONResponse:
-        """Translate expected failures into stable, human-readable JSON."""
-        code = 400
-        if isinstance(error, NotFoundError):
-            code = 404
-        elif isinstance(error, NotImplementedAppError):
-            code = 501
-        elif isinstance(error, WorkflowError):
-            code = 409
-        elif isinstance(error, ValidationError):
-            code = 422
-        return JSONResponse({"detail": str(error)}, status_code=code)
+    def session(request: Request) -> Iterator[Session]:
+        """Open one session per request on the app's data home."""
+        home = request.app.state.home
+        if not isinstance(home, JotHome):  # pragma: no cover - set by build()
+            raise TypeError("app.state.home is not configured")
+        with Session.open(home) as session:
+            yield session
+
+    @staticmethod
+    def context(
+        actor: Annotated[str | None, Header(alias="X-Jot-Actor")] = None,
+        origin: Annotated[str | None, Header(alias="X-Jot-Origin")] = None,
+        reason: Annotated[str | None, Header(alias="X-Jot-Reason")] = None,
+        correlation: Annotated[str | None, Header(alias="X-Jot-Correlation-Id")] = None,
+    ) -> WriteContext:
+        """Build the write context from request headers (origin: api or ui)."""
+        chosen = Origin(origin) if origin in WRITE_ORIGINS else Origin.API
+        kwargs = {"correlation_id": correlation} if correlation else {}
+        return WriteContext(
+            actor=actor or "user", origin=chosen, reason=reason, **kwargs
+        )
+
+
+Db = Annotated[Session, Depends(Dependencies.session)]
+Ctx = Annotated[WriteContext, Depends(Dependencies.context)]
+
+
+class ApiApplication:
+    """Build the FastAPI app for one data home."""
+
+    def __init__(self, home: JotHome) -> None:
+        self.home = home
 
     def build(self) -> FastAPI:
-        """Register async routes and mount only the packaged static directory."""
+        """Return the configured application."""
         app = FastAPI(
-            title="Jot", lifespan=self.lifespan, docs_url=None, redoc_url=None
+            title="Jot",
+            version="0.2",
+            docs_url="/api/docs",
+            openapi_url="/api/openapi.json",
         )
-        for error_type in (AppError, ValidationError, sqlite3.Error, OSError):
-            app.add_exception_handler(error_type, self.error)
-        for routes in (
-            TaskRoutes(self._access),
-            ActionRoutes(self._access),
-            ResourceRoutes(self._access),
-        ):
-            app.include_router(routes.router)
-        app.mount(
-            "/",
-            RevalidatedStaticFiles(
-                directory=Path(__file__).parents[1] / "static", html=True
-            ),
-        )
+        app.add_exception_handler(AppError, self.app_error)  # ty: ignore[invalid-argument-type]
+        app.add_exception_handler(sqlite3.Error, self.storage_error)  # ty: ignore[invalid-argument-type]
+        app.middleware("http")(self.no_cache)
+        app.state.home = self.home
+        self._routes(app)
+        static = Path(str(files("jot") / "static"))
+        app.mount("/", StaticFiles(directory=static, html=True), name="ui")
         return app
 
+    @staticmethod
+    async def no_cache(
+        request: Request, call_next: RequestResponseEndpoint
+    ) -> Response:
+        """Make browsers revalidate UI files so an upgrade never runs stale JS."""
+        response = await call_next(request)
+        response.headers.setdefault("Cache-Control", "no-cache")
+        return response
 
-def create_app(home: JotHome | None = None) -> FastAPI:
-    """Create the public ASGI factory requested by uvicorn and embedding callers."""
-    return Application(home).build()
+    @staticmethod
+    async def app_error(_request: Request, error: AppError) -> JSONResponse:
+        """Map expected failures to HTTP status codes."""
+        status = 422
+        if isinstance(error, NotFoundError):
+            status = 404
+        elif isinstance(error, ConflictError):
+            status = 409
+        return JSONResponse({"error": str(error)}, status_code=status)
+
+    @staticmethod
+    async def storage_error(_request: Request, error: sqlite3.Error) -> JSONResponse:
+        """Report database failures without a traceback."""
+        return JSONResponse({"error": f"Database error: {error}"}, status_code=500)
+
+    def _routes(self, app: FastAPI) -> None:  # noqa: C901 - route table
+        """Register every API route."""
+
+        def commands(session: Session, context: WriteContext) -> Commands:
+            return session.commands(context)
+
+        @app.get("/api/health")
+        def health() -> Health:
+            return Health(status="ok", home=str(self.home.path))
+
+        @app.get("/api/jots")
+        def list_jots(  # noqa: PLR0913 - one parameter per filter
+            session: Db,
+            *,
+            profile: Annotated[list[str] | None, Query()] = None,
+            status: Annotated[list[str] | None, Query()] = None,
+            category: Annotated[list[StatusCategory] | None, Query()] = None,
+            project: str | None = None,
+            label: Annotated[list[str] | None, Query()] = None,
+            q: str | None = None,
+            archived: bool = False,
+            deleted: bool = False,
+            sort: Sort = Sort.RANK,
+            limit: Annotated[int | None, Query(ge=0)] = None,
+        ) -> list[Jot]:
+            return session.queries.jots(
+                JotFilter(
+                    profiles=profile or [],
+                    statuses=status or [],
+                    categories=category or [],
+                    project=project,
+                    labels=label or [],
+                    text=q,
+                    include_archived=archived,
+                    include_deleted=deleted,
+                    sort=sort,
+                    limit=limit,
+                )
+            )
+
+        @app.post("/api/jots", status_code=201)
+        def create_jot(body: CreateJot, session: Db, context: Ctx) -> Jot:
+            return commands(session, context).create(**body.model_dump())
+
+        @app.get("/api/jots/{jot_id}")
+        def get_jot(jot_id: int, session: Db) -> JotDetail:
+            return session.queries.detail(jot_id)
+
+        @app.patch("/api/jots/{jot_id}")
+        def update_jot(jot_id: int, body: UpdateJot, session: Db, context: Ctx) -> Jot:
+            return commands(session, context).update(
+                jot_id,
+                body.patch(),
+                expected_version=body.expected_version,
+                base_version=body.base_version,
+            )
+
+        @app.post("/api/jots/{jot_id}/status")
+        def set_status(jot_id: int, body: SetStatus, session: Db, context: Ctx) -> Jot:
+            return commands(session, context).set_status(
+                jot_id, body.status, expected_version=body.expected_version
+            )
+
+        @app.post("/api/jots/{jot_id}/labels")
+        def labels(jot_id: int, body: ChangeLabels, session: Db, context: Ctx) -> Jot:
+            return commands(session, context).label(
+                jot_id,
+                add=body.add,
+                remove=body.remove,
+                expected_version=body.expected_version,
+            )
+
+        @app.post("/api/jots/{jot_id}/rank")
+        def rank(jot_id: int, body: MoveRank, session: Db, context: Ctx) -> Jot:
+            return commands(session, context).move_rank(
+                jot_id, body.placement, body.anchor
+            )
+
+        @app.post("/api/jots/{jot_id}/archive")
+        def archive(jot_id: int, session: Db, context: Ctx) -> Jot:
+            return commands(session, context).archive(jot_id)
+
+        @app.post("/api/jots/{jot_id}/unarchive")
+        def unarchive(jot_id: int, session: Db, context: Ctx) -> Jot:
+            return commands(session, context).archive(jot_id, archived=False)
+
+        @app.delete("/api/jots/{jot_id}")
+        def delete(jot_id: int, session: Db, context: Ctx) -> Jot:
+            return commands(session, context).delete(jot_id)
+
+        @app.post("/api/jots/{jot_id}/restore")
+        def restore(jot_id: int, session: Db, context: Ctx) -> Jot:
+            return commands(session, context).delete(jot_id, deleted=False)
+
+        @app.post("/api/jots/{jot_id}/comments", status_code=201)
+        def add_comment(
+            jot_id: int, body: AddComment, session: Db, context: Ctx
+        ) -> Comment:
+            return commands(session, context).comment(
+                jot_id, body.body, kind=body.kind, reply_to=body.reply_to
+            )
+
+        @app.patch("/api/comments/{comment_id}")
+        def edit_comment(
+            comment_id: int, body: EditComment, session: Db, context: Ctx
+        ) -> Comment:
+            return commands(session, context).edit_comment(comment_id, body.body)
+
+        @app.delete("/api/comments/{comment_id}", status_code=204)
+        def delete_comment(comment_id: int, session: Db, context: Ctx) -> Response:
+            commands(session, context).delete_comment(comment_id)
+            return Response(status_code=204)
+
+        @app.post("/api/links", status_code=201)
+        def link(body: LinkBody, session: Db, context: Ctx) -> Link:
+            return commands(session, context).link(body.src, body.dst, body.rel)
+
+        @app.post("/api/links/delete", status_code=204)
+        def unlink(body: LinkBody, session: Db, context: Ctx) -> Response:
+            commands(session, context).unlink(body.src, body.dst, body.rel)
+            return Response(status_code=204)
+
+        @app.get("/api/projects")
+        def projects(
+            session: Db,
+            archived: bool = False,  # noqa: FBT001, FBT002 - query flag
+        ) -> list[Project]:
+            return session.queries.projects(include_archived=archived)
+
+        @app.post("/api/projects", status_code=201)
+        def create_project(body: CreateProject, session: Db, context: Ctx) -> Project:
+            return commands(session, context).create_project(
+                body.slug, body.name, body.description
+            )
+
+        @app.patch("/api/projects/{slug}")
+        def update_project(
+            slug: str, body: UpdateProject, session: Db, context: Ctx
+        ) -> Project:
+            return commands(session, context).update_project(
+                slug,
+                name=body.name,
+                description=body.description,
+                archived=body.archived,
+            )
+
+        @app.get("/api/profiles")
+        def profiles(session: Db) -> list[Profile]:
+            return session.profiles.all()
+
+        @app.get("/api/labels")
+        def label_counts(session: Db) -> list[LabelCount]:
+            return [LabelCount(name=n, count=c) for n, c in session.queries.labels()]
+
+        @app.get("/api/events")
+        def events(
+            session: Db,
+            after: int = 0,
+            limit: Annotated[int, Query(ge=1, le=1000)] = 100,
+        ) -> list[Event]:
+            return session.queries.events(after, limit)
+
+        @app.exception_handler(ValidationError)
+        async def invalid(_request: Request, error: ValidationError) -> JSONResponse:
+            return JSONResponse({"error": str(error)}, status_code=422)

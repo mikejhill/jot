@@ -1,69 +1,88 @@
 # Architecture
 
+Jot is an information system with optional automation. The acceptance test for the core is that you can capture and manage jots with no model credentials, no harness installed, and no automation running.
+
+## Layers
+
+```text
+plugins (planned)   rules · harness contract · harness-claude/codex/copilot · triage · execution · notifications
+                         │ use only the public command API, event feed, and extension points
+core                jot.core     records, profiles, rank            (pure, no I/O)
+                    jot.db       SQLite connection, schema, migrations, row mapping
+                    jot.app      Commands (writes), Queries (reads), Session
+interfaces          jot.cli      Typer CLI (HTTP API and web UI planned)
+```
+
+`jot.core` imports nothing from the other packages. Every interface goes through `jot.app`, so the CLI, a future HTTP API, the UI, and plugins share one set of validated commands.
+
 ## Code layout
 
 ```text
 src/jot/
-  cli.py, cli_agents.py   Typer CLI (core commands, agent commands)
-  harnesses.py            typed harness/model/loadout/pin policy
-  config.py               JOT_HOME, config.toml, default instruction files
-  core/                   models, workflow (status machine, claims, leases), prioritize
-  db/                     SQLite connection, schema.sql, versioned migrations, repositories
-  agents/                 provider facade + Claude / Codex / Copilot / fake backends
-  services/               enrich, runner, cleanup, workspaces, event bus, instructions
-  server/                 FastAPI app, routes, SSE stream, uvicorn launcher
-  static/                 web UI: Preact + htm (vendored, no build step), Markdown renderer
-  skills/jot/             agent skill: SKILL.md + references/
-  demo.py                 demo workspace, test server, screenshot generator
+  core/models.py     Jot, Project, Comment, Link, Event, WriteContext, StatusCategory
+  core/profiles.py   Profile, StatusSpec, FieldSpec, ProfileRegistry, built-ins (note, task)
+  core/rank.py       fractional base-36 rank keys
+  db/                connection (WAL, transactions), schema.sql, migrations, Store
+  app/commands.py    every write: one transaction, one event, version bump
+  app/queries.py     filters, full-text search, detail, event feed
+  app/session.py     opens a home + config + database
+  cli/               commands and text/JSON output
+  skills/jot/        agent skill for driving the CLI
 ```
 
 ## Data model
 
-SQLite in WAL mode, with schema versions applied by `db/migrations.py` (`PRAGMA user_version`). Upgrades run in one transaction. `ADD COLUMN` steps are idempotent, and table rebuilds keep row IDs and history.
+| Table | Holds |
+| --- | --- |
+| `jots` | title, body, profile, status, category (denormalized from the profile), project, rank, metadata JSON, version, created_by, timestamps (archived and deleted are soft) |
+| `projects` | slug, name, description, archived |
+| `labels`, `jot_labels` | label names and assignments |
+| `comments` | author, body, kind (`comment` or a plugin kind such as `execution.question`), reply_to, edited/deleted timestamps |
+| `links` | src, dst, rel (`parent`, `relates`, `blocks`, `duplicates`, or a dotted plugin relation) |
+| `events` | append-only history: kind, jot, version, actor, origin, correlation_id, reason, data |
+| `jots_fts` | FTS5 over title, body, and live comments, kept in sync by triggers |
 
-- `tasks`: content, status, flow, lease fields (`claimed_by`, `lease_expires_at`, `lease_prior_status`).
-- `task_events`: append-only history. Created, enriched, status, comment, plan, question, answer, approval, run_log, result, routing.
-- `runs`: backend, harness ID, nullable JSON loadout summary, model, phase, status, worktree/branch, summary, and token totals (input, output, cache read/write, premium requests).
-- `projects`, `labels`, `task_labels`, `cleanup_proposals`, and `tasks_fts` (FTS5, kept in sync by triggers).
+Metadata namespaces: `fields` holds profile fields, validated and typed by the profile. Every other top-level key is a namespace owned by the user (`user`) or by a plugin (`triage`, `execution`). Namespaces merge key by key, and `null` removes one.
 
-Full run logs live outside the database in `runs/<id>.jsonl`.
+## Profiles
 
-## Claims and leases
+A profile declares statuses, an initial status, optional transitions (an empty list allows any move), typed fields (`string`, `number`, `boolean`, `date`, `enum`), and applicable plugins. Profiles never run code. Each status has a category (`open`, `active`, `done`, `cancelled`), so queries and agents can work across profiles. Changing a jot's profile maps its status by id, then by category, then to the initial status.
 
-A claim is a conditional `UPDATE … WHERE status=? AND claimed_by IS NULL` under `BEGIN IMMEDIATE`; zero rows updated means another agent won. The runner heartbeats the lease while it works and releases it to the next status, or to the prior status if the run fails or is cancelled. Expired leases are reaped by the server's background worker or by `jot reap`. Only claims move a task into `planning` or `executing`.
+## Writes, versions, and events
 
-## Agent backends
+`Commands` performs every write in one `BEGIN IMMEDIATE` transaction that changes the rows and appends an event. Each change to a jot bumps `version`, and the event records `{"changes": {field: {"from", "to"}}}`.
 
-All LLM access goes through `jot.agents.base.AgentBackend`:
+- `expected_version`: fail with `ConflictError` (CLI exit 3) if the jot changed at all.
+- `base_version`: fail only if a field being written changed after that version. Metadata is tracked per namespace (`metadata.triage`). This lets a late plugin write its own namespace without overwriting a user's newer edits.
+- `WriteContext` (actor, origin, correlation_id, reason) is stored on every event. Plugins will use `origin` and `actor` to skip their own changes.
 
-- `structured(system, prompt, schema)` returns one JSON object (triage, cleanup).
-- `run(RunRequest)` streams `AgentEvent`s (text, thinking, tool, usage, error) and ends with a `result`.
+The `events` table is also the change feed (`Queries.events(after=id)`, `jot events --after`). The plugin host will deliver it durably with per-plugin cursors.
 
-| Backend | Transport | Usage reporting |
-| --- | --- | --- |
-| `claude` | Claude Agent SDK | Per turn from the API `message_delta` stream event (exact), plus the result total |
-| `codex` | `codex exec --json` | Per turn from `turn.completed` (input net of cached input) |
-| `copilot` | `copilot -p --output-format json` | Model per turn and premium requests; the CLI exposes no token counts |
-| `fake` | In-process | Scripted; used by tests and the demo |
+## HTTP API and web UI
 
-To swap or add an SDK, write one `AgentBackend` subclass and register it in `agents/registry.py` (plus model suggestions for the UI picker). Models resolve per action: an explicit `--model`, else `[models.<backend>].<action>` in `config.toml`, else the provider's default.
+`jot.server` is a thin FastAPI layer over the same `Session`, `Commands`, and `Queries` the CLI uses. Each request opens its own session, so the server holds no state beyond the data home. Write context comes from `X-Jot-*` headers. `AppError` subclasses map to 404, 409, and 422.
 
-## Runs
+The UI (`src/jot/static/`) is Preact plus htm with no build step. It follows the change feed by polling `/api/events`. Extensions register UI through `window.jot.register(slot, item)`:
 
-`services/runner.py` claims the task, resolves the workspace (task or project repo, else a scratch folder that is its own git repo), and creates a worktree for execute runs in git repos. It then streams the backend's events to the run log and the in-process event bus, which feeds the UI over SSE. On finish it records the plan, questions, or result as task events and stores the token totals. Prompts combine the owner's `drawdown.md` with project instructions, the task, and its history.
+| Slot | Item |
+| --- | --- |
+| `views` | `{id, label, render}`: a top-level view next to List and Board |
+| `jot.badges` | `({jot}) => vnode`: shown on list rows and cards |
+| `jot.actions` | `({jot, refresh}) => vnode`: buttons in the drawer header |
+| `jot.panels` | `({detail, refresh}) => vnode`: sections in the drawer |
+| `settings.pages` | `{id, label, render}`: sections on the settings page |
 
-## Web server
+The plugin host (stage 3) will serve plugin UI modules that call this registry.
 
-`jot serve` runs uvicorn with a launcher that closes the event bus on Ctrl+C, so open SSE streams end immediately. A 3-second graceful-shutdown timeout is the backstop. Static UI files are served with `Cache-Control: no-cache`, so browsers always revalidate after an update.
+## Roadmap
 
-## Agent settings and routing
-
-`Config` resolves named `HarnessConfig` instances: explicit picks, then `[actions]` and the selected harness's action model default, then the provider default. Legacy provider tables produce implicit instances. `ModelPolicy` enforces allow/deny lists with deny precedence, and disabled instances cannot execute. Pins are global with optional action filters. Harness and loadout policies have no project overrides.
-
-`BackendRegistry.configured` maps a harness kind to an `AgentBackend` and attaches the action's loadout and appended instructions. Structured phases are forced lean. Plan, execute, and assist loadouts default to no account capabilities with repo instructions enabled. Discovery stays behind the backend facade: Claude init messages, Copilot loaded-capability events, and an empty best-effort Codex inventory.
-
-`SettingsStore` exposes effective settings and performs validated, atomic TOML writes with tomlkit. `GET/PUT /api/settings` and `POST /api/settings/harnesses/{id}/discover` expose these operations. PUT updates all shared service snapshots; already-created agents retain their snapshot. Capture persists the triage pick in its creation event so a later enrichment worker uses the same choice.
-
-`Router` handles the reserved Auto pick using one structured backend call and `instructions/routing.md`. Its configured harness defaults to triage. Candidates include enabled instances, known permitted models, configured defaults, and action-visible pins. Output must name a candidate and pass model policy. Any routing failure uses the action default. A `routing` task event records the explanation and reported usage; a separate JSONL log preserves the call outcome. Agent runs copy their routing explanation into their run log.
-
-Schema v5 adds nullable `runs.harness` and `runs.loadout`, and rebuilds the task-event constraint to admit `routing`, retaining existing event IDs and history. The shared UI picker is used for capture, drawer, and List actions; Settings uses the same policy-filtered model suggestions.
+| Stage | Scope |
+| --- | --- |
+| 1 | Core model, profiles, command API, CLI, skill |
+| 2 (this release) | HTTP API and a web UI shell with extension slots |
+| 3 | Plugin host: entry points, durable event delivery, jobs, plugin storage and settings, UI slots; first plugin is deterministic (`rules`) |
+| 4 | v0.1 importer |
+| 5 | Harness contract plugin plus Claude, Codex, Copilot, and fake implementations |
+| 6 | Triage plugin (`triaging` → `triaged`) |
+| 7 | Cutover from v0.1 |
+| 8 | Execution plugin, with its own design (autonomy contract, attempts, decisions, artifacts) |

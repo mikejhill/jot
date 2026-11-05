@@ -9,8 +9,8 @@
 ## Verification
 
 - [ ] `uv run poe check` passes (format, lint, ty, tests + coverage)
-- [ ] `node --test tests/server/ui.test.mjs` passes (if the UI changed)
-- [ ] Manually checked in `jot serve` (if the UI or CLI behavior changed)
+- [ ] `uv run poe e2e` passes (if the web UI or API changed)
+- [ ] Manually checked with a throwaway `JOT_HOME` (if CLI behavior changed)
 
 ## Notes
 
