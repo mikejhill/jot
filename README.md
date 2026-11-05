@@ -8,7 +8,7 @@ Jot captures, organizes, and retrieves bite-sized information. A "jot" can be a 
 
 Jot's core contains no AI. Automation such as LLM triage or agent execution is planned as plugins (see [Architecture](docs/architecture.md)). Coding agents can already drive Jot through its CLI and the bundled skill.
 
-> **Status:** v0.2 is a rewrite. This release ships the information core and CLI. The plugin host, web UI, and AI plugins follow. The previous agent-drawdown tracker is v0.1.0 (commit `0fae7f4`).
+> **Status:** v0.2 is a rewrite. This release ships the information core, CLI, HTTP API, and web UI. The plugin host and AI plugins follow. The previous agent-drawdown tracker is v0.1.0 (commit `0fae7f4`).
 
 ```text
 $ jot add "Optimize the sales report model for new global channels" -l sales
@@ -27,6 +27,7 @@ $ jot status 2 doing --reason "starting today"
 - **Profiles:** declare statuses (each with a category: open, active, done, cancelled), optional transition rules, and typed fields in `config.toml`. The built-in profiles are `note` and `task`.
 - **Rank:** one global order that is separate from urgency. Use `jot rank <id> --top`, `--before <id>`, and so on.
 - **Safe for automation:** every write records its actor, origin, correlation ID, and reason. `--if-version` and `--base-version` keep late writers from overwriting newer edits.
+- **Web UI and API:** `jot serve` opens a list, board, and detail drawer in the browser over a JSON API (`/api/docs`). Plugins add views, badges, actions, panels, and settings pages through UI slots.
 - **Agent-ready:** every command accepts `--json`, and exit codes are distinct (2 not found, 3 conflict). Install the skill with `jot install-skills`.
 
 ## Quick start
@@ -46,7 +47,7 @@ Data lives in `~/.jot` by default, and `JOT_HOME` overrides it. A v0.1 database 
 | Guide | What's inside |
 | --- | --- |
 | [User guide](docs/user-guide.md) | Commands, profiles, fields, metadata, ranking, automation conventions |
-| [Architecture](docs/architecture.md) | Core model, command API, events, plugin roadmap |
+| [Architecture](docs/architecture.md) | Core model, command API, events, HTTP API, UI slots, plugin roadmap |
 | [Development](docs/development.md) | Setup, checks, CI |
 | [Contributing](CONTRIBUTING.md) | Workflow and checks for changes |
 

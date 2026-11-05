@@ -12,6 +12,7 @@ ALLOWED = {
     "core": {"jot.core", "jot.exceptions"},
     "db": {"jot.core", "jot.db", "jot.exceptions"},
     "app": {"jot.core", "jot.db", "jot.app", "jot.config", "jot.exceptions"},
+    "server": {"jot.core", "jot.app", "jot.config", "jot.exceptions", "jot.server"},
 }
 LLM_MODULES = ("anthropic", "claude_agent_sdk", "openai")
 

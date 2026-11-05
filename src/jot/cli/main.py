@@ -97,6 +97,7 @@ class CommandLine:
             "labels": self.labels,
             "events": self.events,
             "install-skills": self.install_skills,
+            "serve": self.serve,
         }
         for name, method in commands.items():
             self.app.command(name)(method)
@@ -653,3 +654,22 @@ class CommandLine:
                 shutil.copytree(skill, folder, dirs_exist_ok=True)
                 installed.append(str(folder))
         self.emit(installed, "".join(f"Installed {path}\n" for path in installed))
+
+    def serve(
+        self,
+        *,
+        host: Annotated[str, typer.Option("--host")] = "127.0.0.1",
+        port: Annotated[int, typer.Option("--port", min=1, max=65535)] = 8765,
+        open_browser: Annotated[
+            bool, typer.Option("--open", help="Open a browser")
+        ] = False,
+    ) -> None:
+        """Serve the web UI and HTTP API (docs at /api/docs)."""
+        from jot.server.launch import ServerLauncher  # noqa: PLC0415 - lazy: web deps
+
+        try:
+            launcher = ServerLauncher()
+            sys.stderr.write(f"Jot at {launcher.url(host, port)}\n")
+            launcher.run(host=host, port=port, open_browser=open_browser)
+        except AppError as err:
+            self.fail(str(err), err.exit_code)

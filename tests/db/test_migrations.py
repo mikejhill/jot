@@ -64,3 +64,34 @@ class TestMigrations:
             assert (
                 db.connection.execute("SELECT count(*) FROM labels").fetchone()[0] == 0
             )
+
+
+class TestConcurrentInstall:
+    """Many first opens at once install the schema exactly once."""
+
+    def test_parallel_opens(self, home: JotHome) -> None:
+        """Every concurrent opener succeeds on a brand-new database."""
+        from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415
+
+        home.path.mkdir(parents=True, exist_ok=True)
+
+        def open_once(_: int) -> int:
+            with Database.open(home.database) as db:
+                return int(db.connection.execute("PRAGMA user_version").fetchone()[0])
+
+        with ThreadPoolExecutor(max_workers=32) as pool:
+            assert set(pool.map(open_once, range(64))) == {SCHEMA_VERSION}
+
+    def test_statements(self) -> None:
+        """Scripts split on complete statements; comments and tails survive."""
+        from jot.db.migrations import Migrations  # noqa: PLC0415
+
+        script = (
+            "-- note\nCREATE TABLE a (x);\n"
+            "CREATE TRIGGER t AFTER INSERT ON a BEGIN\n  SELECT 1;\nEND;\nSELECT 2"
+        )
+        assert Migrations.statements(script) == [
+            "CREATE TABLE a (x);",
+            "CREATE TRIGGER t AFTER INSERT ON a BEGIN\n  SELECT 1;\nEND;",
+            "SELECT 2",
+        ]

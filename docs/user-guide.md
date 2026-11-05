@@ -85,6 +85,26 @@ Exit codes: 0 ok, 1 invalid input or config, 2 not found, 3 conflict.
 
 Install the agent skill with `jot install-skills --target claude` (also `codex`, `copilot`, or `--dest <folder>`).
 
+## Web UI and HTTP API
+
+```bash
+jot serve                    # http://127.0.0.1:8765
+jot serve --port 9000 --open # and open a browser
+```
+
+The UI has a capture box, filters (search, category, profile, project, label, archived), a list and a board grouped by status category, a detail drawer (title, body, status, profile, project, fields, labels, comments, links, history), and settings. Other clients' changes appear within about 3 seconds. Concurrent edits to the same jot show a conflict notice instead of overwriting.
+
+The API lives under `/api` (interactive docs at `/api/docs`). Writes accept these headers:
+
+| Header | Meaning |
+| --- | --- |
+| `X-Jot-Actor` | who is writing (default `user`) |
+| `X-Jot-Origin` | `api` (default) or `ui` |
+| `X-Jot-Reason` | free-text reason stored on the event |
+| `X-Jot-Correlation-Id` | groups related writes |
+
+Status codes: 404 not found, 409 conflict, 422 invalid input. `PATCH /api/jots/{id}` accepts `expected_version` and `base_version` like the CLI.
+
 ## Data home
 
 `$JOT_HOME` (default `~/.jot`) holds `config.toml` and `jot.db` (SQLite, WAL). v0.2 refuses to open a v0.1 database. Keep v0.1 data in its own home until the importer ships.

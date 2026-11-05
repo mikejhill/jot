@@ -58,12 +58,28 @@ A profile declares statuses, an initial status, optional transitions (an empty l
 
 The `events` table is also the change feed (`Queries.events(after=id)`, `jot events --after`). The plugin host will deliver it durably with per-plugin cursors.
 
+## HTTP API and web UI
+
+`jot.server` is a thin FastAPI layer over the same `Session`, `Commands`, and `Queries` the CLI uses. Each request opens its own session, so the server holds no state beyond the data home. Write context comes from `X-Jot-*` headers. `AppError` subclasses map to 404, 409, and 422.
+
+The UI (`src/jot/static/`) is Preact plus htm with no build step. It follows the change feed by polling `/api/events`. Extensions register UI through `window.jot.register(slot, item)`:
+
+| Slot | Item |
+| --- | --- |
+| `views` | `{id, label, render}`: a top-level view next to List and Board |
+| `jot.badges` | `({jot}) => vnode`: shown on list rows and cards |
+| `jot.actions` | `({jot, refresh}) => vnode`: buttons in the drawer header |
+| `jot.panels` | `({detail, refresh}) => vnode`: sections in the drawer |
+| `settings.pages` | `{id, label, render}`: sections on the settings page |
+
+The plugin host (stage 3) will serve plugin UI modules that call this registry.
+
 ## Roadmap
 
 | Stage | Scope |
 | --- | --- |
-| 1 (this release) | Core model, profiles, command API, CLI, skill |
-| 2 | HTTP API and a web UI shell with extension slots |
+| 1 | Core model, profiles, command API, CLI, skill |
+| 2 (this release) | HTTP API and a web UI shell with extension slots |
 | 3 | Plugin host: entry points, durable event delivery, jobs, plugin storage and settings, UI slots; first plugin is deterministic (`rules`) |
 | 4 | v0.1 importer |
 | 5 | Harness contract plugin plus Claude, Codex, Copilot, and fake implementations |
