@@ -6,6 +6,8 @@ from __future__ import annotations
 class AppError(Exception):
     """Base error for user-facing failures."""
 
+    exit_code = 1
+
 
 class ConfigurationError(AppError):
     """Invalid configuration."""
@@ -18,10 +20,14 @@ class RepositoryError(AppError):
 class NotFoundError(RepositoryError):
     """Requested record does not exist."""
 
-
-class WorkflowError(AppError):
-    """Transition or lease operation is invalid."""
+    exit_code = 2
 
 
-class NotImplementedAppError(AppError):
-    """Command is reserved for a later phase."""
+class InvalidInputError(AppError):
+    """A command's input breaks a core or profile rule."""
+
+
+class ConflictError(AppError):
+    """A write was based on a stale version of the record."""
+
+    exit_code = 3

@@ -1,86 +1,77 @@
-"""Data-home defaults, non-destructive initialization, and validation."""
+"""Data home initialization and profile configuration."""
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
-from jot.config import JotHome
-from jot.core.models import Flow
-from jot.exceptions import ConfigurationError
+from jot.config import DEFAULT_CONFIG, JotHome
+from jot.exceptions import ConfigurationError, InvalidInputError
+
+BUG = """
+default_profile = "bug"
+[profiles.bug]
+initial = "new"
+statuses = [
+  { id = "new", category = "open" },
+  { id = "fixed", category = "done" },
+]
+transitions = [["new", "fixed"]]
+plugins = ["triage"]
+[profiles.bug.fields.severity]
+type = "enum"
+options = ["low", "high"]
+"""
 
 
-class TestJotHome:
-    """Home initialization preserves user instructions and settings."""
+class TestHome:
+    """Initialization writes defaults once and loads settings."""
 
-    def test_defaults(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Default and explicit homes resolve and create useful guidance."""
-        monkeypatch.delenv("JOT_HOME", raising=False)
-        assert JotHome.resolve().path == Path.home() / ".jot"
-        monkeypatch.setenv("JOT_HOME", str(tmp_path))
-        home = JotHome.resolve()
+    def test_defaults(self, home: JotHome) -> None:
+        """A new home gets the commented default config."""
         config = home.initialize()
-        assert config.drawdown.default_flow == Flow.PLANNED
-        assert config.server.port == 8765
-        assert (tmp_path / "instructions/projects").is_dir()
-        assert (tmp_path / "backups").is_dir()
-        for name in ("triage", "drawdown", "cleanup"):
-            assert (
-                len((tmp_path / f"instructions/{name}.md").read_text(encoding="utf-8"))
-                > 400
-            )
-        custom = tmp_path / "instructions/triage.md"
-        custom.write_text("custom", encoding="utf-8")
-        home.initialize()
-        assert custom.read_text(encoding="utf-8") == "custom"
+        assert home.config_file.read_text(encoding="utf-8") == DEFAULT_CONFIG
+        assert config.registry().get().id == "note"
+        assert home.database.name == "jot.db"
 
-    @pytest.mark.parametrize(
-        "content",
-        [
-            "[drawdown]\nconcurrency=0",
-            '[drawdown]\ndefault_flow="wrong"',
-            "[server]\nport=99999",
-            "invalid [",
-        ],
-    )
-    def test_invalid_config(self, home: JotHome, content: str) -> None:
-        """Invalid TOML or config types produce a ConfigurationError."""
-        (home.path / "config.toml").write_text(content, encoding="utf-8")
-        with pytest.raises(ConfigurationError, match="Cannot load"):
+    def test_keeps_edits(self, home: JotHome) -> None:
+        """Existing settings are never overwritten."""
+        home.path.mkdir(parents=True, exist_ok=True)
+        home.config_file.write_text(BUG, encoding="utf-8")
+        registry = home.initialize().registry()
+        bug = registry.get()
+        assert bug.id == "bug"
+        assert bug.label == "Bug"
+        assert bug.transitions == (("new", "fixed"),)
+        assert bug.plugins == ("triage",)
+        assert home.config_file.read_text(encoding="utf-8") == BUG
+
+    @pytest.mark.parametrize("text", ["not = [toml", "unknown_key = 1"])
+    def test_invalid_file(self, home: JotHome, text: str) -> None:
+        """Broken or unknown settings fail clearly."""
+        home.path.mkdir(parents=True, exist_ok=True)
+        home.config_file.write_text(text, encoding="utf-8")
+        with pytest.raises(ConfigurationError):
             home.initialize()
 
-
-class TestModelResolution:
-    """Config.model_for precedence."""
-
-    def test_precedence(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Override > models.<backend>.<action> > legacy triage model > default."""
-        monkeypatch.setenv("JOT_HOME", str(tmp_path))
-        (tmp_path / "config.toml").write_text(
-            '[triage]\nmodel = "haiku"\n[models.claude]\nplan = "opus"\n',
+    def test_invalid_profile(self, home: JotHome) -> None:
+        """An inconsistent profile is a configuration error."""
+        home.path.mkdir(parents=True, exist_ok=True)
+        home.config_file.write_text(
+            '[profiles.x]\ninitial = "nope"\n'
+            'statuses = [{id = "a", category = "open"}]',
             encoding="utf-8",
         )
-        config = JotHome.resolve().initialize()
-        assert config.model_for("claude", "plan") == "opus"
-        assert config.model_for("claude", "plan", "sonnet") == "sonnet"
-        assert config.model_for("claude", "execute") is None
-        assert config.model_for("claude", "triage") == "haiku"
-        assert config.model_for("codex", "plan", " ") is None
-        assert config.model_for("codex", "unknown") is None
+        with pytest.raises(ConfigurationError, match="Profile 'x'"):
+            home.initialize().registry()
 
+    def test_unknown_default(self, home: JotHome) -> None:
+        """The default profile must exist."""
+        home.path.mkdir(parents=True, exist_ok=True)
+        home.config_file.write_text('default_profile = "epic"', encoding="utf-8")
+        with pytest.raises(InvalidInputError):
+            home.initialize().registry()
 
-class TestLegacyTriageScope:
-    """Legacy [triage] model only applies to the legacy triage backend."""
-
-    def test_scoped_to_triage_backend(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Codex gets the legacy model; Claude keeps its provider default."""
-        monkeypatch.setenv("JOT_HOME", str(tmp_path))
-        (tmp_path / "config.toml").write_text(
-            '[triage]\nbackend = "codex"\nmodel = "gpt-6-luna"\n', encoding="utf-8"
-        )
-        config = JotHome.resolve().initialize()
-        assert config.model_for("codex", "triage") == "gpt-6-luna"
-        assert config.model_for("claude", "triage") is None
+    def test_resolve_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Without JOT_HOME the home is ~/.jot."""
+        monkeypatch.delenv("JOT_HOME", raising=False)
+        assert JotHome.resolve().path.name == ".jot"

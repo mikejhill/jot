@@ -1,3 +1,3 @@
-"""SQLite persistence and repositories."""
+"""SQLite connection, schema, and migrations."""
 
 from __future__ import annotations
