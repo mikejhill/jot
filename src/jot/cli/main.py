@@ -110,6 +110,9 @@ class CommandLine:
         profiles.command("ls")(self.profile_ls)
         profiles.command("show")(self.profile_show)
         self.app.add_typer(profiles, name="profile")
+        from jot.cli.plugins import PluginCommands  # noqa: PLC0415 - avoids a cycle
+
+        PluginCommands(self).register(self.app)
 
     # Plumbing -------------------------------------------------------------
 
@@ -663,6 +666,10 @@ class CommandLine:
         open_browser: Annotated[
             bool, typer.Option("--open", help="Open a browser")
         ] = False,
+        worker: Annotated[
+            bool,
+            typer.Option("--worker/--no-worker", help="Run enabled plugins alongside"),
+        ] = True,
     ) -> None:
         """Serve the web UI and HTTP API (docs at /api/docs)."""
         from jot.server.launch import ServerLauncher  # noqa: PLC0415 - lazy: web deps
@@ -670,6 +677,6 @@ class CommandLine:
         try:
             launcher = ServerLauncher()
             sys.stderr.write(f"Jot at {launcher.url(host, port)}\n")
-            launcher.run(host=host, port=port, open_browser=open_browser)
+            launcher.run(host=host, port=port, open_browser=open_browser, worker=worker)
         except AppError as err:
             self.fail(str(err), err.exit_code)

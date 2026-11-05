@@ -95,3 +95,42 @@ class TestConcurrentInstall:
             "CREATE TRIGGER t AFTER INSERT ON a BEGIN\n  SELECT 1;\nEND;",
             "SELECT 2",
         ]
+
+
+class TestUpgrades:
+    """Databases written by earlier schema versions upgrade in place."""
+
+    def test_v1_to_current(self, home: JotHome) -> None:
+        """A version 1 database keeps its data and gains the plugin tables."""
+        from jot.db.migrations import Migrations  # noqa: PLC0415
+
+        home.path.mkdir(parents=True, exist_ok=True)
+        connection = sqlite3.connect(home.database)
+        connection.executescript(Migrations.script("schema.sql"))
+        connection.execute(
+            "INSERT INTO jots (title, profile, status, category, rank, created_by,"
+            " created_at, updated_at) VALUES ('kept', 'note', 'open', 'open', 'm',"
+            " 'user', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')"
+        )
+        connection.execute("PRAGMA user_version = 1")
+        connection.commit()
+        connection.close()
+        with Database.open(home.database) as db:
+            assert Migrations.version(db.connection) == SCHEMA_VERSION
+            title = db.connection.execute("SELECT title FROM jots").fetchone()[0]
+            assert title == "kept"
+            tables = {
+                row[0]
+                for row in db.connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+            assert {"plugins", "plugin_state", "plugin_failures", "jobs"} <= tables
+
+    def test_every_version_has_an_upgrade(self) -> None:
+        """Each version after the base has exactly one packaged script."""
+        from jot.db.migrations import Migrations  # noqa: PLC0415
+
+        assert sorted(Migrations.UPGRADES) == list(range(2, SCHEMA_VERSION + 1))
+        for name in Migrations.UPGRADES.values():
+            assert Migrations.statements(Migrations.script(name))

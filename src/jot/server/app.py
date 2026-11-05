@@ -34,6 +34,9 @@ from jot.core.models import (
 )
 from jot.core.profiles import Profile
 from jot.exceptions import AppError, ConflictError, NotFoundError
+from jot.plugins.api import Job, JobStatus
+from jot.plugins.host import PluginCatalog, PluginHost, PluginStatus
+from jot.plugins.store import Failure
 from jot.server.schemas import (
     AddComment,
     ChangeLabels,
@@ -44,6 +47,7 @@ from jot.server.schemas import (
     MoveRank,
     SetStatus,
     UpdateJot,
+    UpdatePlugin,
     UpdateProject,
 )
 
@@ -77,6 +81,14 @@ class Dependencies:
             yield session
 
     @staticmethod
+    def host(request: Request, session: Db) -> PluginHost:
+        """Return a plugin host bound to the request's session."""
+        catalog = request.app.state.catalog
+        if not isinstance(catalog, PluginCatalog):  # pragma: no cover - set by build()
+            raise TypeError("app.state.catalog is not configured")
+        return PluginHost(session, catalog)
+
+    @staticmethod
     def context(
         actor: Annotated[str | None, Header(alias="X-Jot-Actor")] = None,
         origin: Annotated[str | None, Header(alias="X-Jot-Origin")] = None,
@@ -93,13 +105,15 @@ class Dependencies:
 
 Db = Annotated[Session, Depends(Dependencies.session)]
 Ctx = Annotated[WriteContext, Depends(Dependencies.context)]
+Host = Annotated[PluginHost, Depends(Dependencies.host)]
 
 
 class ApiApplication:
     """Build the FastAPI app for one data home."""
 
-    def __init__(self, home: JotHome) -> None:
+    def __init__(self, home: JotHome, catalog: PluginCatalog | None = None) -> None:
         self.home = home
+        self.catalog = catalog if catalog is not None else PluginCatalog.discover()
 
     def build(self) -> FastAPI:
         """Return the configured application."""
@@ -113,6 +127,7 @@ class ApiApplication:
         app.add_exception_handler(sqlite3.Error, self.storage_error)  # ty: ignore[invalid-argument-type]
         app.middleware("http")(self.no_cache)
         app.state.home = self.home
+        app.state.catalog = self.catalog
         self._routes(app)
         static = Path(str(files("jot") / "static"))
         app.mount("/", StaticFiles(directory=static, html=True), name="ui")
@@ -303,6 +318,55 @@ class ApiApplication:
             limit: Annotated[int, Query(ge=1, le=1000)] = 100,
         ) -> list[Event]:
             return session.queries.events(after, limit)
+
+        @app.get("/api/plugins")
+        def plugins(host: Host) -> list[PluginStatus]:
+            return host.statuses()
+
+        @app.get("/api/plugins/{plugin_id}")
+        def plugin(plugin_id: str, host: Host) -> PluginStatus:
+            return host.status(plugin_id)
+
+        @app.patch("/api/plugins/{plugin_id}")
+        def update_plugin(
+            plugin_id: str, body: UpdatePlugin, host: Host, context: Ctx
+        ) -> PluginStatus:
+            if body.settings is not None:
+                host.configure(plugin_id, body.settings, context)
+            if body.enabled is True:
+                host.enable(plugin_id, context, from_start=body.from_start)
+            elif body.enabled is False:
+                host.disable(plugin_id, context)
+            return host.status(plugin_id)
+
+        @app.get("/api/plugins/{plugin_id}/ui.js")
+        def plugin_ui(plugin_id: str, host: Host) -> Response:
+            source = host.instance(plugin_id).ui_module()
+            if source is None:
+                raise NotFoundError(f"Plugin {plugin_id!r} has no UI module")
+            return Response(source, media_type="text/javascript")
+
+        @app.get("/api/plugins/{plugin_id}/failures")
+        def plugin_failures(plugin_id: str, host: Host) -> list[Failure]:
+            host.catalog.get(plugin_id)
+            return host.failures(plugin_id)
+
+        @app.get("/api/jobs")
+        def jobs(
+            host: Host,
+            plugin: str | None = None,
+            status: Annotated[list[JobStatus] | None, Query()] = None,
+            limit: Annotated[int, Query(ge=1, le=1000)] = 100,
+        ) -> list[Job]:
+            return host.jobs(plugin_id=plugin, statuses=status, limit=limit)
+
+        @app.post("/api/jobs/{job_id}/cancel")
+        def cancel_job(job_id: int, host: Host) -> Job:
+            return host.cancel(job_id)
+
+        @app.post("/api/jobs/{job_id}/retry")
+        def retry_job(job_id: int, host: Host) -> Job:
+            return host.retry(job_id)
 
         @app.exception_handler(ValidationError)
         async def invalid(_request: Request, error: ValidationError) -> JSONResponse:

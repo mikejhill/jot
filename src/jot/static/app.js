@@ -43,13 +43,21 @@ export class Api {
 export const SLOTS = ['views', 'jot.badges', 'jot.actions', 'jot.panels', 'settings.pages'];
 const registry = Object.fromEntries(SLOTS.map(slot => [slot, []]));
 window.jot = {
-  version: 1, api: Api, html, slots: SLOTS,
+  version: 1, api: Api, html, h, Component, slots: SLOTS,
   register(slot, item) {
     if (!registry[slot]) throw new Error(`Unknown slot ${slot}`);
     registry[slot].push(item);
     window.dispatchEvent(new Event('jot:extensions'));
   },
 };
+// Plugin UI modules are served by the API; each may export default setup(window.jot).
+const loadedModules = new Set();
+export async function loadPluginUi(plugin) {
+  if (!plugin.enabled || !plugin.has_ui || loadedModules.has(plugin.id)) return;
+  loadedModules.add(plugin.id);
+  const module = await import(`/api/plugins/${encodeURIComponent(plugin.id)}/ui.js`);
+  if (typeof module.default === 'function') module.default(window.jot);
+}
 const fill = (slot, props) => registry[slot].map((render, index) => html`<span class="slot" data-slot=${slot} key=${index}>${render(props)}</span>`);
 
 export class Route {
@@ -65,7 +73,7 @@ class App extends Component {
   state = {
     ...Route.parse(location.hash), jots: [], profiles: [], projects: [], labels: [], detail: null, toasts: [],
     filters: { category: ['open', 'active'], profile: '', project: '', label: '', q: '', archived: false },
-    capture: '', captureProfile: '', lastEvent: 0, loading: true,
+    capture: '', captureProfile: '', lastEvent: 0, loading: true, plugins: [], jobs: [],
   };
 
   componentDidMount() {
@@ -97,6 +105,21 @@ class App extends Component {
       if (this.state.jot) await this.loadDetail(this.state.jot);
     });
     this.setState({ loading: false });
+    await this.act(() => this.loadPlugins());
+  }
+
+  async loadPlugins() {
+    const [plugins, jobs] = await Promise.all([Api.request('/plugins'), Api.request('/jobs?limit=20')]);
+    this.setState({ plugins, jobs });
+    for (const plugin of plugins) {
+      try { await loadPluginUi(plugin); } catch (error) { this.toast(`Plugin ${plugin.id} UI failed to load: ${error.message}`); }
+    }
+  }
+
+  async pluginChange(work) {
+    const result = await this.act(work);
+    await this.act(() => this.loadPlugins());
+    return result;
   }
 
   async poll() {
@@ -105,6 +128,7 @@ class App extends Component {
       if (!events.length) return;
       this.setState({ lastEvent: events[events.length - 1].id });
       await this.refresh();
+      if (this.state.view === 'settings') await this.loadPlugins();
       if (this.state.jot && events.some(e => e.jot_id === this.state.jot)) await this.loadDetail(this.state.jot);
     } catch { /* offline: try again next tick */ }
   }
@@ -227,7 +251,20 @@ class App extends Component {
         <p>${p.statuses.map(s => html`<span class=${'status ' + s.category}>${human(s.id)}</span> `)}</p>
         ${Object.keys(p.fields).length > 0 && html`<p class="muted">Fields: ${Object.entries(p.fields).map(([n, s]) => `${n} (${s.type})`).join(', ')}</p>`}
         ${p.plugins.length > 0 && html`<p class="muted">Plugins: ${p.plugins.join(', ')}</p>`}</article>`)}
+      <h2>Plugins</h2>${this.state.plugins.length ? this.state.plugins.map(p => html`<${PluginPanel} key=${p.id} plugin=${p} app=${this}/>`) : html`<p class="muted">No plugins installed.</p>`}
+      ${this.renderJobs()}
       ${registry['settings.pages'].map(page => html`<h2>${page.label}</h2>${page.render({ api: Api })}`)}</section>`;
+  }
+
+  renderJobs() {
+    const jobs = this.state.jobs;
+    if (!jobs.length) return null;
+    return html`<h2>Recent jobs</h2><ol class="list jobs" aria-label="Jobs">${jobs.map(j => html`<li key=${j.id} class="job">
+      <span class="id">#${j.id}</span><span>${j.plugin} · ${j.kind}</span><span class=${'pill job-' + j.status}>${j.status}</span>
+      <span class="muted">attempt ${j.attempts}/${j.max_attempts}${j.jot_id ? ` · jot #${j.jot_id}` : ''}${j.error ? ` · ${j.error}` : ''}</span>
+      ${(j.status === 'queued' || j.status === 'running') && html`<button class="text" onClick=${() => this.pluginChange(() => Api.request(`/jobs/${j.id}/cancel`, 'POST'))}>Cancel</button>`}
+      ${(j.status === 'failed' || j.status === 'cancelled') && html`<button class="text" onClick=${() => this.pluginChange(() => Api.request(`/jobs/${j.id}/retry`, 'POST'))}>Retry</button>`}
+    </li>`)}</ol>`;
   }
 
   renderDrawer() {
@@ -248,6 +285,36 @@ class App extends Component {
       <main>${view !== 'settings' && this.renderCapture()}${(view === 'list' || view === 'board') && this.renderFilters()}${body}</main>
       ${this.renderDrawer()}
       <div class="toasts" aria-live="polite">${toasts.map(t => html`<div role="status" class="toast">${t.message}<button aria-label="Dismiss" onClick=${() => this.setState(s => ({ toasts: s.toasts.filter(x => x.id !== t.id) }))}>✕</button></div>`)}</div></div>`;
+  }
+}
+
+class PluginPanel extends Component {
+  constructor(props) { super(props); this.state = { text: JSON.stringify(props.plugin.settings, null, 2), dirty: false }; }
+  componentDidUpdate(previous) {
+    if (!this.state.dirty && previous.plugin.settings !== this.props.plugin.settings) {
+      const text = JSON.stringify(this.props.plugin.settings, null, 2);
+      if (text !== this.state.text) this.setState({ text });
+    }
+  }
+  async save() {
+    let settings;
+    try { settings = JSON.parse(this.state.text); } catch (error) { this.props.app.toast(`Settings are not valid JSON: ${error.message}`); return; }
+    const saved = await this.props.app.pluginChange(() => Api.request(`/plugins/${this.props.plugin.id}`, 'PATCH', { settings }));
+    if (saved) { this.setState({ dirty: false }); this.props.app.toast(`Saved ${saved.name || saved.id} settings`); }
+  }
+  render({ plugin: p, app }, { text, dirty }) {
+    const toggle = enabled => app.pluginChange(() => Api.request(`/plugins/${p.id}`, 'PATCH', { enabled }));
+    return html`<article class="panel plugin" aria-label=${`Plugin ${p.id}`}>
+      <h3>${p.name || p.id} <code>${p.id}</code> ${p.version && html`<span class="muted">v${p.version}</span>`}</h3>
+      ${p.error ? html`<p class="error">Cannot load: ${p.error}</p>` : html`
+        <p class="muted">${p.description}</p>
+        <label class="check"><input type="checkbox" checked=${p.enabled} onChange=${e => toggle(e.target.checked)}/> Enabled</label>
+        ${p.enabled && html`<p class="muted">Behind by ${p.lag} event${p.lag === 1 ? '' : 's'}${p.failures ? ` · ${p.failures} failed attempt${p.failures === 1 ? '' : 's'}` : ''}</p>`}
+        ${p.last_error && html`<p class="error">Last error: ${p.last_error}</p>`}
+        ${Object.keys(p.settings_schema.properties || {}).length > 0 && html`<details><summary>Settings (JSON)</summary>
+          <textarea rows="8" aria-label=${`Settings for ${p.id}`} value=${text} onInput=${e => this.setState({ text: e.target.value, dirty: true })}></textarea>
+          <div class="inline"><button class="primary" onClick=${() => this.save()}>Save settings</button></div></details>`}`}
+    </article>`;
   }
 }
 

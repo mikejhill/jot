@@ -261,3 +261,49 @@ class TestViews:
         expect(page.locator(".ext-settings")).to_be_visible()
         with pytest.raises(Exception, match="Unknown slot"):
             page.evaluate("() => window.jot.register('nope', () => null)")
+
+
+class TestPlugins:
+    """Plugins are administered and extend the UI from the settings page."""
+
+    def test_rules_plugin(self, page: Page, live: LiveServer) -> None:
+        """Enable rules, configure one, and watch it label a new jot."""
+        page.goto("/#/settings")
+        panel = page.get_by_role("article", name="Plugin rules")
+        expect(panel).to_contain_text("Rules")
+        panel.get_by_label("Enabled").check()
+        expect(panel).to_contain_text("Behind by")
+        expect(page.get_by_role("heading", name="Rules", exact=True)).to_be_visible()
+        expect(page.locator(".settings")).to_contain_text("No rules yet")
+        panel.get_by_text("Settings (JSON)").click()
+        rules = {
+            "rules": [
+                {
+                    "name": "money",
+                    "when": {"text": "invoice"},
+                    "then": {"add_labels": ["finance"]},
+                }
+            ],
+            "ignore_plugins": True,
+        }
+        editor = panel.get_by_label("Settings for rules")
+        editor.fill("{ not json")
+        panel.get_by_role("button", name="Save settings").click()
+        expect(page.get_by_role("status")).to_contain_text("not valid JSON")
+        editor.fill(json.dumps({"rules": [{"name": "x", "when": {"pattern": "("}}]}))
+        panel.get_by_role("button", name="Save settings").click()
+        expect(page.get_by_role("status").last).to_contain_text("Invalid settings")
+        editor.fill(json.dumps(rules))
+        panel.get_by_role("button", name="Save settings").click()
+        expect(page.get_by_role("status").last).to_contain_text("Saved Rules settings")
+        page.reload()
+        expect(page.locator(".rules-list")).to_contain_text("money")
+        page.get_by_role("link", name="List").click()
+        page.get_by_label("Capture a jot").fill("Pay the invoice")
+        page.get_by_label("Capture a jot").press("Enter")
+        expect(page.get_by_role("list", name="Jots")).to_contain_text("#finance")
+        page.get_by_role("link", name="Settings").click()
+        expect(panel).to_contain_text("Behind by 0 events")
+        panel.get_by_label("Enabled").uncheck()
+        expect(panel).not_to_contain_text("Behind by")
+        assert api(live, "GET", "/plugins/rules")["enabled"] is False  # ty: ignore[not-subscriptable]

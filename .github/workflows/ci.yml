@@ -78,8 +78,13 @@ jobs:
           uv pip install --python /tmp/smoke dist/*.whl
           JOT_HOME=/tmp/jot-home /tmp/smoke/bin/jot add "smoke test" --json
           JOT_HOME=/tmp/jot-home /tmp/smoke/bin/jot ls --json
+          JOT_HOME=/tmp/jot-home /tmp/smoke/bin/jot plugin ls | grep -q '^rules'
+          JOT_HOME=/tmp/jot-home /tmp/smoke/bin/jot plugin enable rules
+          JOT_HOME=/tmp/jot-home /tmp/smoke/bin/jot plugin run --once
           test -f "$(/tmp/smoke/bin/python -c 'import jot, pathlib; print(pathlib.Path(jot.__file__).parent / "skills/jot/SKILL.md")')"
           test -f "$(/tmp/smoke/bin/python -c 'import jot, pathlib; print(pathlib.Path(jot.__file__).parent / "db/schema.sql")')"
+          test -f "$(/tmp/smoke/bin/python -c 'import jot, pathlib; print(pathlib.Path(jot.__file__).parent / "db/upgrade_2.sql")')"
+          test -f "$(/tmp/smoke/bin/python -c 'import jot, pathlib; print(pathlib.Path(jot.__file__).parent / "plugins/rules/ui.js")')"
           test -f "$(/tmp/smoke/bin/python -c 'import jot, pathlib; print(pathlib.Path(jot.__file__).parent / "static/index.html")')"
       - uses: actions/upload-artifact@v7
         with:

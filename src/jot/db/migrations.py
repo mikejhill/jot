@@ -4,25 +4,36 @@ from __future__ import annotations
 
 import sqlite3
 from importlib.resources import files
+from typing import ClassVar
 
 from jot.exceptions import RepositoryError
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class Migrations:
     """Install the current schema; refuse databases this version cannot read.
 
-    Later versions add an entry to ``UPGRADES`` (target version -> script) and
-    a test that upgrades a database written by the previous version.
+    ``schema.sql`` is the version 1 base. Each later version adds a packaged
+    ``upgrade_<n>.sql`` to ``UPGRADES`` (target version -> script) and a test
+    that upgrades a database written by the previous version. A fresh install
+    runs the base and every upgrade in one transaction.
     """
 
-    UPGRADES: dict[int, str] = {}  # noqa: RUF012 - filled by later schema versions
+    UPGRADES: ClassVar[dict[int, str]] = {2: "upgrade_2.sql"}
 
     @staticmethod
-    def schema() -> str:
-        """Return the current full schema script."""
-        return files("jot.db").joinpath("schema.sql").read_text(encoding="utf-8")
+    def script(name: str) -> str:
+        """Return a packaged SQL script."""
+        return files("jot.db").joinpath(name).read_text(encoding="utf-8")
+
+    @classmethod
+    def schema(cls) -> str:
+        """Return the full current schema: the base plus every upgrade."""
+        return "\n".join(
+            [cls.script("schema.sql")]
+            + [cls.script(cls.UPGRADES[target]) for target in sorted(cls.UPGRADES)]
+        )
 
     @staticmethod
     def version(connection: sqlite3.Connection) -> int:
@@ -47,7 +58,7 @@ class Migrations:
                     [cls.schema()]
                     if version == 0
                     else [
-                        cls.UPGRADES[target]
+                        cls.script(cls.UPGRADES[target])
                         for target in range(version + 1, SCHEMA_VERSION + 1)
                     ]
                 )

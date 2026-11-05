@@ -19,13 +19,13 @@ Never point development or tests at your real data home (`~/.jot`). `.smoke-home
 
 | `uv run poe e2e` | Playwright browser tests of the web UI against a live server (Chromium; run `uv run playwright install chromium` once) |
 
-Tests are grouped by layer: `tests/core` (pure), `tests/db`, `tests/app` (commands and queries against a real SQLite file), `tests/cli` (Typer runner, including the no-plugins acceptance flow), `tests/server` (FastAPI TestClient), and `tests/e2e` (browser, marked `e2e` and excluded from the default run). E2E tests fail on any browser console error.
+Tests are grouped by layer: `tests/core` (pure), `tests/db`, `tests/app` (commands and queries against a real SQLite file), `tests/cli` (Typer runner, including the no-plugins acceptance flow), `tests/plugins` (host delivery, jobs, rules, with test plugins and a fake clock), `tests/server` (FastAPI TestClient), and `tests/e2e` (browser, marked `e2e` and excluded from the default run). E2E tests fail on any browser console error.
 
 The web UI is plain ES modules (Preact and htm, vendored in `src/jot/static/vendor/`), with no build step.
 
 ## Schema changes
 
-Add the next version to `Migrations.UPGRADES` in `src/jot/db/migrations.py`, bump `SCHEMA_VERSION`, update `schema.sql`, and add a test that upgrades a database written by the previous version.
+`schema.sql` is the version 1 base and is never edited. For each new version, add `src/jot/db/upgrade_<n>.sql`, register it in `Migrations.UPGRADES`, bump `SCHEMA_VERSION`, and add a test in `tests/db/test_migrations.py` that upgrades a database written by the previous version. A fresh install runs the base plus every upgrade.
 
 ## CI
 

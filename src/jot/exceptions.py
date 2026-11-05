@@ -31,3 +31,7 @@ class ConflictError(AppError):
     """A write was based on a stale version of the record."""
 
     exit_code = 3
+
+
+class PluginError(AppError):
+    """A plugin is missing, broken, misconfigured, or misused."""

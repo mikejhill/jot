@@ -91,3 +91,11 @@ class UpdateProject(Record):
     name: str | None = None
     description: str | None = None
     archived: bool | None = None
+
+
+class UpdatePlugin(Record):
+    """Enable, disable, or configure a plugin."""
+
+    enabled: bool | None = None
+    from_start: bool = False
+    settings: Metadata | None = None
