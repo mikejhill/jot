@@ -5,15 +5,17 @@ Jot is an information system with optional automation. The acceptance test for t
 ## Layers
 
 ```text
-plugins (planned)   rules · harness contract · harness-claude/codex/copilot · triage · execution · notifications
-                         │ use only the public command API, event feed, and extension points
+plugins             rules (shipped) · harness contract · harness-claude/codex/copilot · triage · execution (planned)
+                         │ use only the plugin API: commands, queries, event feed, jobs, state, UI slots
+host                jot.plugins  discovery, durable delivery, jobs, settings, state, worker
 core                jot.core     records, profiles, rank            (pure, no I/O)
                     jot.db       SQLite connection, schema, migrations, row mapping
                     jot.app      Commands (writes), Queries (reads), Session
-interfaces          jot.cli      Typer CLI (HTTP API and web UI planned)
+interfaces          jot.cli      Typer CLI
+                    jot.server   FastAPI HTTP API + static web UI
 ```
 
-`jot.core` imports nothing from the other packages. Every interface goes through `jot.app`, so the CLI, a future HTTP API, the UI, and plugins share one set of validated commands.
+`jot.core` imports nothing from the other packages. Every interface goes through `jot.app`, so the CLI, the HTTP API, the UI, and plugins share one set of validated commands.
 
 ## Code layout
 
@@ -26,7 +28,14 @@ src/jot/
   app/commands.py    every write: one transaction, one event, version bump
   app/queries.py     filters, full-text search, detail, event feed
   app/session.py     opens a home + config + database
-  cli/               commands and text/JSON output
+  plugins/api.py     Plugin base class, Job, API_VERSION (the plugin contract)
+  plugins/host.py    PluginCatalog (entry points), PluginHost (admin, delivery, jobs), Worker
+  plugins/context.py PluginContext and PluginState handed to plugin code
+  plugins/store.py   SQL for plugin rows, failures, state, and jobs
+  plugins/rules/     the built-in rules plugin and its UI module
+  cli/               commands and text/JSON output (cli/plugins.py: plugin and job groups)
+  server/            FastAPI app, request schemas, uvicorn launcher
+  static/            web UI (Preact + htm, no build step)
   skills/jot/        agent skill for driving the CLI
 ```
 
@@ -40,6 +49,10 @@ src/jot/
 | `comments` | author, body, kind (`comment` or a plugin kind such as `execution.question`), reply_to, edited/deleted timestamps |
 | `links` | src, dst, rel (`parent`, `relates`, `blocks`, `duplicates`, or a dotted plugin relation) |
 | `events` | append-only history: kind, jot, version, actor, origin, correlation_id, reason, data |
+| `plugins` | per-plugin enabled flag, settings JSON, event cursor, failure count, retry time, last error |
+| `plugin_failures` | events a plugin skipped after repeated errors |
+| `plugin_state` | private key-value JSON per plugin |
+| `jobs` | plugin, kind, jot, payload, dedupe key, status, attempts, lease, result or error |
 | `jots_fts` | FTS5 over title, body, and live comments, kept in sync by triggers |
 
 Metadata namespaces: `fields` holds profile fields, validated and typed by the profile. Every other top-level key is a namespace owned by the user (`user`) or by a plugin (`triage`, `execution`). Namespaces merge key by key, and `null` removes one.
@@ -56,7 +69,13 @@ A profile declares statuses, an initial status, optional transitions (an empty l
 - `base_version`: fail only if a field being written changed after that version. Metadata is tracked per namespace (`metadata.triage`). This lets a late plugin write its own namespace without overwriting a user's newer edits.
 - `WriteContext` (actor, origin, correlation_id, reason) is stored on every event. Plugins will use `origin` and `actor` to skip their own changes.
 
-The `events` table is also the change feed (`Queries.events(after=id)`, `jot events --after`). The plugin host will deliver it durably with per-plugin cursors.
+The `events` table is also the change feed (`Queries.events(after=id)`, `jot events --after`, `GET /api/events`). Writers serialize on `BEGIN IMMEDIATE`, so event ids commit in increasing order and a cursor never skips one.
+
+## Plugin host
+
+The host delivers the feed to each enabled plugin with its own cursor. Each event is handled inside the write transaction that advances the cursor, so a plugin's writes and its progress commit or roll back together. The plugin's database effects happen exactly once; anything else it does (a job, a call to another system) is at-least-once. Failures back off exponentially, and after five tries the event goes to `plugin_failures` and is skipped. Slow work goes into jobs, which run outside transactions under renewable leases, with retries and dedupe keys.
+
+Plugins never touch tables directly. They get a `PluginContext` with attributed commands, queries, settings, private state, and job control. See [Plugins](plugins.md) for the contract and the rules plugin.
 
 ## HTTP API and web UI
 
@@ -72,15 +91,15 @@ The UI (`src/jot/static/`) is Preact plus htm with no build step. It follows the
 | `jot.panels` | `({detail, refresh}) => vnode`: sections in the drawer |
 | `settings.pages` | `{id, label, render}`: sections on the settings page |
 
-The plugin host (stage 3) will serve plugin UI modules that call this registry.
+The plugin host serves each enabled plugin's UI module at `/api/plugins/<id>/ui.js`. The UI imports it at startup, and it calls this registry through `setup(jot)`.
 
 ## Roadmap
 
 | Stage | Scope |
 | --- | --- |
 | 1 | Core model, profiles, command API, CLI, skill |
-| 2 (this release) | HTTP API and a web UI shell with extension slots |
-| 3 | Plugin host: entry points, durable event delivery, jobs, plugin storage and settings, UI slots; first plugin is deterministic (`rules`) |
+| 2 | HTTP API and a web UI shell with extension slots |
+| 3 (this release) | Plugin host: entry points, durable event delivery, jobs, plugin storage and settings, UI slots; first plugin is deterministic (`rules`) |
 | 4 | v0.1 importer |
 | 5 | Harness contract plugin plus Claude, Codex, Copilot, and fake implementations |
 | 6 | Triage plugin (`triaging` → `triaged`) |

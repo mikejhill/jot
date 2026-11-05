@@ -606,6 +606,11 @@ class Commands:
         )
         return Rank.between(pivot, high)
 
+    def record(self, kind: str, data: Metadata) -> None:
+        """Append an event that is not about one jot (for example plugin admin)."""
+        with self.db.write() as conn:
+            self._event(conn, kind, None, None, data)
+
     def _event(
         self,
         conn: sqlite3.Connection,

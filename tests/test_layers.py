@@ -12,7 +12,22 @@ ALLOWED = {
     "core": {"jot.core", "jot.exceptions"},
     "db": {"jot.core", "jot.db", "jot.exceptions"},
     "app": {"jot.core", "jot.db", "jot.app", "jot.config", "jot.exceptions"},
-    "server": {"jot.core", "jot.app", "jot.config", "jot.exceptions", "jot.server"},
+    "plugins": {
+        "jot.core",
+        "jot.db",
+        "jot.app",
+        "jot.config",
+        "jot.exceptions",
+        "jot.plugins",
+    },
+    "server": {
+        "jot.core",
+        "jot.app",
+        "jot.config",
+        "jot.exceptions",
+        "jot.plugins",
+        "jot.server",
+    },
 }
 LLM_MODULES = ("anthropic", "claude_agent_sdk", "openai")
 
@@ -32,7 +47,7 @@ def imports(path: Path) -> set[str]:
 @pytest.mark.parametrize("layer", sorted(ALLOWED))
 def test_layer_imports(layer: str) -> None:
     """Each layer imports only from itself and the layers below it."""
-    for path in (SRC / layer).glob("*.py"):
+    for path in (SRC / layer).rglob("*.py"):
         for module in imports(path):
             if module.startswith("jot"):
                 assert any(

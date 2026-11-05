@@ -105,6 +105,18 @@ The API lives under `/api` (interactive docs at `/api/docs`). Writes accept thes
 
 Status codes: 404 not found, 409 conflict, 422 invalid input. `PATCH /api/jots/{id}` accepts `expected_version` and `base_version` like the CLI.
 
+## Plugins
+
+Plugins add automation such as rules. They are off until you enable them:
+
+```bash
+jot plugin ls
+jot plugin enable rules
+jot plugin config rules --file rules.json
+```
+
+`jot serve` runs enabled plugins in the background, or you can use `jot plugin run`. See [Plugins](plugins.md).
+
 ## Data home
 
 `$JOT_HOME` (default `~/.jot`) holds `config.toml` and `jot.db` (SQLite, WAL). v0.2 refuses to open a v0.1 database. Keep v0.1 data in its own home until the importer ships.

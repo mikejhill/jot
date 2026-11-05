@@ -84,3 +84,9 @@ nav a[aria-current="page"] { background: var(--surface); color: var(--text); bor
   .capture { flex-wrap: wrap; }
   .capture textarea { flex-basis: 100%; }
 }
+.error { color: var(--danger); }
+.plugin details { margin-top: 8px; }
+.plugin textarea { font-family: ui-monospace, monospace; font-size: 13px; margin-top: 8px; }
+.jobs .job { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 12px; }
+.job-failed { color: var(--danger); } .job-done { color: var(--done); } .job-running { color: var(--active); }
+.rules-list { margin: 0; padding-left: 20px; }

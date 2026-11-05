@@ -12,7 +12,11 @@ import uvicorn
 from playwright.sync_api import Browser, ConsoleMessage, Page, sync_playwright
 
 from jot.config import JotHome
+from jot.plugins.host import PluginCatalog, Worker
 from jot.server.app import ApiApplication
+
+# Statuses some tests provoke on purpose (conflicts, invalid input).
+EXPECTED = ("409", "422")
 
 
 class LiveServer:
@@ -22,11 +26,13 @@ class LiveServer:
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
             self.port = int(probe.getsockname()[1])
+        catalog = PluginCatalog.discover()
         config = uvicorn.Config(
-            ApiApplication(home).build(), port=self.port, log_level="warning"
+            ApiApplication(home, catalog).build(), port=self.port, log_level="warning"
         )
         self.server = uvicorn.Server(config)
         self.thread = threading.Thread(target=self.server.run, daemon=True)
+        self.worker = Worker(home, catalog, interval=0.1)
 
     @property
     def url(self) -> str:
@@ -36,6 +42,7 @@ class LiveServer:
     def __enter__(self) -> LiveServer:
         """Start and wait until the server accepts connections."""
         self.thread.start()
+        self.worker.start()
         deadline = time.monotonic() + 10
         while not self.server.started:
             if time.monotonic() > deadline:  # pragma: no cover - startup failure
@@ -45,6 +52,7 @@ class LiveServer:
 
     def __exit__(self, *_exc: object) -> None:
         """Stop the server thread."""
+        self.worker.stop()
         self.server.should_exit = True
         self.thread.join(timeout=10)
 
@@ -73,7 +81,8 @@ def page(browser: Browser, live: LiveServer) -> Iterator[Page]:
     errors: list[str] = []
 
     def record(message: ConsoleMessage) -> None:
-        if message.type == "error" and "409" not in message.text:
+        expected = any(f"status of {code}" in message.text for code in EXPECTED)
+        if message.type == "error" and not expected:
             errors.append(message.text)
 
     tab.on("console", record)

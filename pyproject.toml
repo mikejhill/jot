@@ -36,6 +36,9 @@ Issues = "https://github.com/mikejhill/jot/issues"
 [project.scripts]
 jot = "jot.__main__:Application.main"
 
+[project.entry-points."jot.plugins"]
+rules = "jot.plugins.rules:RulesPlugin"
+
 [build-system]
 requires = ["uv_build>=0.12.23,<0.13.0"]
 build-backend = "uv_build"

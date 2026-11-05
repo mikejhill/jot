@@ -8,6 +8,7 @@ import pytest
 import uvicorn
 
 from jot.config import JotHome
+from jot.plugins.host import Worker
 from jot.server.launch import ServerLauncher
 
 
@@ -73,5 +74,22 @@ class TestLauncher:
             calls.append(open_browser)
 
         monkeypatch.setattr(ServerLauncher, "serve", staticmethod(serve))
-        ServerLauncher(home).run(host="127.0.0.1", port=9998, open_browser=False)
+        ServerLauncher(home).run(
+            host="127.0.0.1", port=9998, open_browser=False, worker=False
+        )
         assert calls == [False]
+
+    def test_run_with_worker(
+        self, home: JotHome, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The plugin worker starts with the server and stops after it."""
+        seen: list[str] = []
+
+        async def serve(_server: object, _url: str, *, open_browser: bool) -> None:
+            seen.append(f"serve {open_browser}")
+
+        monkeypatch.setattr(ServerLauncher, "serve", staticmethod(serve))
+        monkeypatch.setattr(Worker, "start", lambda _self: seen.append("start"))
+        monkeypatch.setattr(Worker, "stop", lambda _self: seen.append("stop"))
+        ServerLauncher(home).run(host="127.0.0.1", port=9997, open_browser=True)
+        assert seen == ["start", "serve True", "stop"]
