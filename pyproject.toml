@@ -43,6 +43,7 @@ harness-claude = "jot.plugins.harness:ClaudePlugin"
 harness-codex = "jot.plugins.harness:CodexPlugin"
 harness-copilot = "jot.plugins.harness:CopilotPlugin"
 harness-fake = "jot.plugins.harness:FakePlugin"
+triage = "jot.plugins.triage:TriagePlugin"
 
 [build-system]
 requires = ["uv_build>=0.12.23,<0.13.0"]

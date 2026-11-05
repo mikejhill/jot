@@ -1,6 +1,6 @@
 # Plugins
 
-Plugins add behavior to Jot without changing the core. A plugin can react to every change, keep private state, run background jobs, store validated settings, and add UI. Jot ships `rules` and the `harness` family, which gives other plugins one interface over coding-agent CLIs. AI features such as triage and execution are planned as plugins on top of it.
+Plugins add behavior to Jot without changing the core. A plugin can react to every change, keep private state, run background jobs, store validated settings, and add UI. Jot ships `rules`, the `harness` family (one interface over coding-agent CLIs), and `triage`, which tidies new jots through the harness. Execution is planned as a plugin too.
 
 ## Using plugins
 
@@ -135,6 +135,32 @@ class TriagePlugin(Plugin):
         )
         return result.value
 ```
+
+## Triage
+
+`triage` tidies each new jot with the harness (action `triage`). Capture never waits for it: the jot is saved at once, labelled `triaging`, and a background job does the rest.
+
+```bash
+jot plugin enable harness && jot plugin enable harness-claude && jot plugin enable triage
+jot add "safari login times out, maybe the cookie"   # triaged by the worker
+jot triage run 12          # queue again
+jot triage run 12 --now    # triage here and wait
+```
+
+The model proposes a title, a Markdown body, a project, labels, values for empty profile fields, a confidence, and questions. Triage then writes only what is safe, in one change attributed to `plugin:triage`:
+
+| Proposal | Applied when |
+| --- | --- |
+| title | `rewrite_title` is on and you haven't edited the title since capture (the original is kept in `metadata.triage.original_title`) |
+| body | the jot has no body and you haven't edited it |
+| project | the jot has none; an existing slug, or a new project only with `create_projects` |
+| labels | always added (normalized, at most `max_labels`, existing labels kept) |
+| profile fields | the field is declared, still empty, and you haven't edited fields |
+| questions | each becomes a `triage.question` comment |
+
+The jot ends up labelled `triaged`, plus `needs-input` when confidence is below `min_confidence` or there are questions. `metadata.triage` records the confidence, questions, and model. If the harness keeps failing (`max_attempts`, default 3), the jot is labelled `triage-failed` with a `triage.note` comment, and is otherwise left as captured.
+
+Settings: `profiles` (which profiles to triage, empty means all), `guidance` (instructions to the model), `min_confidence` (0.6), `rewrite_title` (true), `create_projects` (false), `max_labels` (5), `max_attempts` (3). Pick the backend and model with a harness route: `{"routes": {"triage": {"harness": "claude", "model": "..."}}}`.
 
 ## Writing a plugin
 
