@@ -6,7 +6,7 @@
 
 Jot captures, organizes, and retrieves bite-sized information. A "jot" can be a one-line idea or a thorough note. Each one has a profile, a status, a project, labels, a rank, comments, links, history, and free-form metadata. Everything runs locally on SQLite.
 
-Jot's core contains no AI. Automation comes from plugins (see [Plugins](docs/plugins.md)). The built-in `rules` plugin is deterministic; LLM triage and agent execution are planned as plugins. Coding agents can already drive Jot through its CLI and the bundled skill.
+Jot's core contains no AI. Automation comes from plugins (see [Plugins](docs/plugins.md)). The built-in `rules` plugin is deterministic. The `harness` plugins run requests through the Claude Code, Codex, or Copilot CLI you already use, with explicit permission levels; LLM triage and agent execution are planned on top of them. Coding agents can already drive Jot through its CLI and the bundled skill.
 
 > **Status:** v0.2 is a rewrite. This release ships the information core, CLI, HTTP API, web UI, and plugin host with a deterministic `rules` plugin. AI plugins follow. The previous agent-drawdown tracker is v0.1.0 (commit `0fae7f4`).
 

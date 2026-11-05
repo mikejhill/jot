@@ -42,6 +42,7 @@ jot events --after <event id> --json                   # change feed for scripts
 jot plugin ls --json ; jot plugin enable|disable <id>  # plugins (ask before enabling)
 jot plugin config <id> [--set '<json>']                # settings
 jot job ls [--status failed] --json                    # plugin background jobs
+jot harness ls --json ; jot harness check <id>        # AI backends (harness plugins)
 ```
 
 Exit codes: 0 ok, 1 invalid input or config, 2 not found, 3 version conflict.

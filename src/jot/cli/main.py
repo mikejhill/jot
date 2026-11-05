@@ -116,7 +116,10 @@ class CommandLine:
         self.app.add_typer(imports, name="import")
         from jot.cli.plugins import PluginCommands  # noqa: PLC0415 - avoids a cycle
 
-        PluginCommands(self).register(self.app)
+        plugin_commands = PluginCommands(self)
+        plugin_commands.register(self.app)
+        taken = {*commands, "project", "profile", "import", "plugin", "job"}
+        plugin_commands.mount(self.app, taken)
 
     # Plumbing -------------------------------------------------------------
 

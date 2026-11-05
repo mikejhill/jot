@@ -5,7 +5,7 @@ Jot is an information system with optional automation. The acceptance test for t
 ## Layers
 
 ```text
-plugins             rules (shipped) · harness contract · harness-claude/codex/copilot · triage · execution (planned)
+plugins             rules · harness + harness-claude/codex/copilot/fake (shipped) · triage · execution (planned)
                          │ use only the plugin API: commands, queries, event feed, jobs, state, UI slots
 host                jot.plugins  discovery, durable delivery, jobs, settings, state, worker
 core                jot.core     records, profiles, rank            (pure, no I/O)
@@ -100,8 +100,8 @@ The plugin host serves each enabled plugin's UI module at `/api/plugins/<id>/ui.
 | 1 | Core model, profiles, command API, CLI, skill |
 | 2 | HTTP API and a web UI shell with extension slots |
 | 3 | Plugin host: entry points, durable event delivery, jobs, plugin storage and settings, UI slots; first plugin is deterministic (`rules`) |
-| 4 (this release) | v0.1 importer (`jot import v01`) |
-| 5 | Harness contract plugin plus Claude, Codex, Copilot, and fake implementations |
+| 4 | v0.1 importer (`jot import v01`) |
+| 5 (this release) | Harness contract plugin plus Claude, Codex, Copilot, and fake implementations; plugin services (`provides`/`requires`) and plugin CLI commands |
 | 6 | Triage plugin (`triaging` → `triaged`) |
 | 7 | Cutover from v0.1 |
 | 8 | Execution plugin, with its own design (autonomy contract, attempts, decisions, artifacts) |

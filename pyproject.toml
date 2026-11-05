@@ -38,6 +38,11 @@ jot = "jot.__main__:Application.main"
 
 [project.entry-points."jot.plugins"]
 rules = "jot.plugins.rules:RulesPlugin"
+harness = "jot.plugins.harness:HarnessPlugin"
+harness-claude = "jot.plugins.harness:ClaudePlugin"
+harness-codex = "jot.plugins.harness:CodexPlugin"
+harness-copilot = "jot.plugins.harness:CopilotPlugin"
+harness-fake = "jot.plugins.harness:FakePlugin"
 
 [build-system]
 requires = ["uv_build>=0.12.23,<0.13.0"]
