@@ -15,7 +15,9 @@ from jot.plugins.api import JobStatus
 from jot.plugins.host import PluginCatalog, PluginHost, PluginStatus, Worker
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Sequence
+
+    from pydantic import BaseModel
 
     from jot.cli.main import CommandLine
     from jot.core.models import Metadata
@@ -57,11 +59,24 @@ class PluginCommands:
         jobs.command("retry")(self.retry)
         app.add_typer(jobs, name="job")
 
+    def mount(self, app: typer.Typer, taken: set[str]) -> None:
+        """Mount each installed plugin's own commands as ``jot <id> ...``."""
+        for plugin_id, entry in sorted(self.catalog.entries.items()):
+            if entry.plugin is None or plugin_id in taken:
+                continue
+            group = entry.plugin.commands(self)
+            if group is not None:
+                app.add_typer(group, name=plugin_id)
+
     @contextmanager
     def host(self, *, json: bool) -> Iterator[PluginHost]:
         """Open a session (errors become exit codes) and bind a host to it."""
         with self.cli.session(json=json) as session:
             yield PluginHost(session, self.catalog)
+
+    def emit(self, value: BaseModel | Sequence[BaseModel], text: str) -> None:
+        """Write JSON or text through the main CLI."""
+        self.cli.emit(value, text)
 
     @staticmethod
     def line(status: PluginStatus) -> str:

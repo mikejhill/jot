@@ -57,6 +57,7 @@ class PluginContext:
         clock: Callable[[], float],
         job: Job | None = None,
         lease: float = 0,
+        resolver: Callable[[str], list[object]] | None = None,
     ) -> None:
         self.session = session
         self.store = store
@@ -66,6 +67,7 @@ class PluginContext:
         self.clock = clock
         self.job = job
         self.lease = lease
+        self.resolver = resolver
         self.state = PluginState(store, plugin_id)
 
     @property
@@ -109,6 +111,19 @@ class PluginContext:
         )
         with self.store.db.write():
             return self.store.enqueue(job)
+
+    def service(self, name: str) -> object:
+        """Return the service ``name`` (e.g. ``harness@1``) from an enabled provider."""
+        found = self.services(name)
+        if not found:
+            raise PluginError(f"No enabled plugin provides {name}")
+        return found[0]
+
+    def services(self, name: str) -> list[object]:
+        """Return the service from every enabled provider, ordered by plugin id."""
+        if self.resolver is None:
+            return []
+        return self.resolver(name)
 
     def heartbeat(self) -> None:
         """Extend the current job's lease during long work."""

@@ -1,6 +1,6 @@
 # Plugins
 
-Plugins add behavior to Jot without changing the core. A plugin can react to every change, keep private state, run background jobs, store validated settings, and add UI. Jot ships one plugin, `rules`. AI features such as triage and execution are planned as plugins too.
+Plugins add behavior to Jot without changing the core. A plugin can react to every change, keep private state, run background jobs, store validated settings, and add UI. Jot ships `rules` and the `harness` family, which gives other plugins one interface over coding-agent CLIs. AI features such as triage and execution are planned as plugins on top of it.
 
 ## Using plugins
 
@@ -65,6 +65,76 @@ A profile's `plugins` list limits which plugins act on its jots. An empty list (
 
 Only differences are written, so a rule that already holds changes nothing. Writes are attributed to `plugin:rules` with the reason `rule: <name>`. A rule's own writes never re-trigger it. With `ignore_plugins` (the default), changes made by other plugins don't trigger rules either.
 
+## Harness
+
+The harness plugins run AI requests through a coding-agent CLI you have already installed and signed in to. Jot stores no API keys. `harness` is a router that provides the `harness@1` service; each backend plugin provides `harness.backend@1` and needs the router:
+
+```bash
+jot plugin enable harness           # first: backends require it
+jot plugin enable harness-claude    # also harness-codex, harness-copilot, harness-fake
+jot harness ls                      # enabled backends, availability, permission flags
+jot harness check claude            # one tiny structured call, end to end
+```
+
+| Backend | Program | Usage reported |
+| --- | --- | --- |
+| `harness-claude` | `claude -p --output-format stream-json` | tokens and cost |
+| `harness-codex` | `codex exec --json` | tokens (input net of cache) |
+| `harness-copilot` | `copilot -p --output-format json` | premium requests; tokens estimated |
+| `harness-fake` | none (offline, deterministic) | fixed |
+
+Backend settings (`jot plugin config harness-claude --set ...`): `command` (program and fixed arguments, default the CLI's name on `PATH`), `model`, `extra_args`. The fake takes `canned` (values merged into every answer), `reply`, and `fail`.
+
+### Modes
+
+- **Structured**: a tool-less prompt answered with one JSON object matching a JSON Schema. It runs in a throwaway folder with each CLI's lean options (no session saved, no MCP, no project instructions) and checks the schema's required keys.
+- **Run**: an agentic session in a working directory, streamed as `text`, `thinking`, `tool`, `usage`, and `error` events. The last event is always `result`, with the session id for resuming.
+
+### Permissions
+
+Every run asks for one of three levels. Each backend maps them to its own flags explicitly (shown by `jot harness ls`):
+
+| Level | Claude Code | Codex | Copilot |
+| --- | --- | --- | --- |
+| `read_only` | `dontAsk`, tools Read, Grep, Glob, WebSearch, WebFetch | `--sandbox read-only` | tools view, glob, grep, web_fetch |
+| `workspace_write` | `dontAsk`, the above plus Edit, Write, MultiEdit | `--sandbox workspace-write` | the above plus edit, create; `--allow-all-tools` |
+| `full` | `bypassPermissions` | `--dangerously-bypass-approvals-and-sandbox` | `--allow-all-tools` |
+
+No level grants a shell except `full`. Use `full` only in isolated workspaces.
+
+### Routing and policy
+
+`jot plugin config harness --set '{...}'`:
+
+```json
+{
+  "default": "claude",
+  "routes": {"triage": {"harness": "codex", "model": "gpt-5-mini"}},
+  "allowed_models": [],
+  "blocked_models": ["some-expensive-model"],
+  "max_permission": "workspace_write"
+}
+```
+
+A request's backend is, in order: the one the caller names, the action's route, `default`, then the first enabled backend whose CLI is installed. The model is the caller's, else the route's, else the CLI's own default. Blocked models are refused; when `allowed_models` is set, any explicit model must be listed. Runs above `max_permission` (default `workspace_write`) are refused, so `full` must be opted into.
+
+### Using it from a plugin
+
+```python
+from jot.plugins.harness import SERVICE, HarnessService
+from jot.plugins.harness.api import StructuredRequest
+
+class TriagePlugin(Plugin):
+    requires = frozenset({SERVICE})
+
+    def run(self, job, context):
+        harness = context.service(SERVICE)
+        result = harness.structured(
+            StructuredRequest(prompt=..., output_schema=SCHEMA), action="triage"
+        )
+        return result.value
+```
+
 ## Writing a plugin
 
 A plugin is a `jot.plugins.api.Plugin` subclass published under the `jot.plugins` entry-point group:
@@ -121,6 +191,9 @@ class DigestPlugin(Plugin):
 | `context.enqueue(kind, payload, jot_id=, delay=, dedupe_key=, max_attempts=)` | Queue a job. A queued or running job with the same `dedupe_key` is reused. |
 | `context.settings` | An instance of `settings_model`, validated on save. |
 | Metadata | Store plugin data on jots under a metadata namespace named after the plugin (`metadata.<id>`). |
+| Services | `provides` and `requires` list service names with a major version (`harness@1`). A plugin can't be enabled until every required service has an enabled provider, and a provider can't be disabled while an enabled plugin depends on it. `service(name, context)` returns the provided object; consumers call `context.service(name)` (the first enabled provider by id) or `context.services(name)` (all of them). |
+| `listens` | `False` skips the event feed entirely, for plugins that only provide services. |
+| `commands(cli)` | Return a Typer app to mount as `jot <id> ...`. `cli.host(json=...)` opens the data home with a plugin host; `cli.emit(value, text)` prints JSON or text. |
 | `api` | Targets host API `1`. A mismatch makes the plugin show as broken. |
 
 ### UI
