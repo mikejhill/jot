@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel
 
 if TYPE_CHECKING:
+    from jot.app.importer import ImportReport
     from jot.app.queries import JotDetail
     from jot.core.models import Comment, Event, Jot, Project
     from jot.core.profiles import Profile
@@ -156,3 +157,29 @@ class Output:
         if profile.plugins:
             rows.append(f"  plugins: {', '.join(profile.plugins)}")
         return "\n".join(rows) + "\n"
+
+    @staticmethod
+    def import_report(report: ImportReport) -> str:
+        """Summarize an import."""
+        verb = "Would import" if report.dry_run else "Imported"
+        lines = [
+            f"{verb} {report.jots} jots ({report.deleted} deleted, {report.archived}"
+            f" archived), {report.comments} comments, {report.links} parent links,"
+            f" {report.events} events, {report.runs} runs from {report.source}",
+        ]
+        if report.projects_created:
+            lines.append(f"projects created: {', '.join(report.projects_created)}")
+        if report.projects_existing:
+            lines.append(f"projects reused: {', '.join(report.projects_existing)}")
+        lines.extend(
+            f"  {mapping}: {count}"
+            for mapping, count in sorted(report.statuses.items())
+        )
+        lines.extend(
+            f"label {old!r} -> {new!r}" for old, new in report.renamed_labels.items()
+        )
+        lines.extend(
+            f"skipped {count} {name}" for name, count in report.skipped.items()
+        )
+        lines.extend(f"warning: {warning}" for warning in report.warnings)
+        return "\n".join(lines) + "\n"

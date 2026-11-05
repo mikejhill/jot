@@ -119,4 +119,32 @@ jot plugin config rules --file rules.json
 
 ## Data home
 
-`$JOT_HOME` (default `~/.jot`) holds `config.toml` and `jot.db` (SQLite, WAL). v0.2 refuses to open a v0.1 database. Keep v0.1 data in its own home until the importer ships.
+`$JOT_HOME` (default `~/.jot`) holds `config.toml` and `jot.db` (SQLite, WAL). v0.2 refuses to open a v0.1 database; import it instead (below).
+
+## Moving from v0.1
+
+The importer reads a v0.1 `jot.db` without changing it and fills an empty v0.2 home. Stop any v0.1 server or agents first so the file is not mid-write.
+
+```bash
+JOT_HOME=~/.jot-v2 jot import v01 ~/.jot/jot.db --dry-run   # report only
+JOT_HOME=~/.jot-v2 jot import v01 ~/.jot/jot.db
+```
+
+| v0.1 | v0.2 |
+| --- | --- |
+| task (same id, so `#26` stays `#26`) | jot with the `task` profile (`--profile` to choose another with todo/doing/done/wont_do) |
+| inbox, ready | `todo` (inbox tasks still needing enrichment get the label `triaging`) |
+| planning, needs_input, awaiting_approval, executing, review | `doing` plus a label of the old state (`needs-input`, `awaiting-approval`, …) |
+| blocked | `todo` plus the label `blocked` |
+| done, wont_do | `done`, `wont_do` |
+| archived | `todo`, archived |
+| type (other than idea) | a label (`bug`, `feature`, …) |
+| labels | labels, lowercased with dashes (renames are listed in the report) |
+| comment, plan, question, answer, approval, result events | comments with the original author and time (`execution.plan`, `execution.question`, …) |
+| parent | a `parent` link |
+| criticality, flow, due date, repo path, raw input, lease, completion time | the jot's `v01` metadata namespace |
+| full event log, runs (cost, tokens, model) | the `jot.imported` event's data |
+| projects | projects; repo path, aliases, and priority go in a `project.imported` event |
+| cleanup proposals | not imported (counted in the report) |
+
+Open work is ranked first, by criticality and then age; finished work goes last. The import runs in one transaction, so it either completes or changes nothing. It refuses a home that already has jots.

@@ -384,3 +384,25 @@ class TestContext:
             "enrich",
         )
         assert jot.created_by == "plugin:triage"
+
+
+class TestImportJot:
+    """The import write path keeps ids and refuses collisions."""
+
+    def test_collisions_and_validation(self, commands: Commands) -> None:
+        """Existing ids, empty text, and bad comment kinds are refused."""
+        from datetime import UTC, datetime  # noqa: PLC0415
+
+        from jot.app.commands import ImportedComment, ImportedJot  # noqa: PLC0415
+        from jot.exceptions import ConflictError, InvalidInputError  # noqa: PLC0415
+
+        when = datetime(2026, 1, 1, tzinfo=UTC)
+        record = ImportedJot(id=5, title="t", created_at=when, updated_at=when)
+        assert commands.import_jot(record).id == 5
+        with pytest.raises(ConflictError, match="already exists"):
+            commands.import_jot(record)
+        with pytest.raises(InvalidInputError, match="no text"):
+            commands.import_jot(record.model_copy(update={"id": 6, "title": " "}))
+        bad = ImportedComment(author="a", body="b", kind="Bad Kind", created_at=when)
+        with pytest.raises(InvalidInputError, match="comment kind"):
+            commands.import_jot(record.model_copy(update={"id": 7, "comments": [bad]}))

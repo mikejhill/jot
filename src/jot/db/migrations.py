@@ -87,7 +87,7 @@ class Migrations:
         ).fetchone():
             raise RepositoryError(
                 "This is a Jot v0.1 database and cannot be opened in place. "
-                "Point JOT_HOME at a new folder (a v0.1 importer is planned)."
+                "Point JOT_HOME at a new folder and run `jot import v01 <path>`."
             )
 
     @staticmethod
