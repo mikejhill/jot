@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Iterable
+from datetime import datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
@@ -62,6 +63,35 @@ class JotPatch(Record):
     profile: str | None = None
     fields: dict[str, JsonValue] = Field(default_factory=dict)
     metadata: dict[str, JsonValue] = Field(default_factory=dict)
+
+
+class ImportedComment(Record):
+    """A comment carried over from another system, with its original author."""
+
+    author: str = Field(min_length=1)
+    body: str = Field(min_length=1)
+    kind: str = "comment"
+    created_at: datetime
+
+
+class ImportedJot(Record):
+    """A jot carried over from another system with its id and timestamps."""
+
+    id: int = Field(gt=0)
+    title: str = ""
+    body: str = ""
+    profile: str | None = None
+    status: str | None = None
+    project: str | None = None
+    labels: list[str] = Field(default_factory=list)
+    metadata: Metadata = Field(default_factory=dict)
+    created_by: str = "user"
+    created_at: datetime
+    updated_at: datetime
+    archived_at: datetime | None = None
+    deleted_at: datetime | None = None
+    comments: list[ImportedComment] = Field(default_factory=list)
+    data: Metadata = Field(default_factory=dict)
 
 
 class Commands:
@@ -435,6 +465,59 @@ class Commands:
             )
             self._event(conn, "project.updated", None, None, {"slug": slug, **values})
             return self.store.get_project(slug)
+
+    def import_jot(self, record: ImportedJot) -> Jot:
+        """Insert a jot from another system, keeping its id and timestamps.
+
+        The jot goes to the bottom of the rank order. Comments keep their
+        authors and times. One ``jot.imported`` event records ``record.data``.
+        """
+        if not (record.title.strip() or record.body.strip()):
+            raise InvalidInputError(f"Imported jot {record.id} has no text")
+        spec = self.profiles.get(record.profile)
+        state = spec.status(record.status or spec.initial_status)
+        for comment in record.comments:
+            self._check_name(comment.kind, "comment kind")
+        with self.db.write() as conn:
+            if conn.execute("SELECT 1 FROM jots WHERE id = ?", (record.id,)).fetchone():
+                raise ConflictError(f"Jot {record.id} already exists")
+            conn.execute(
+                "INSERT INTO jots (id, title, body, profile, status, category,"
+                " project_id, rank, metadata, created_by, created_at, updated_at,"
+                " archived_at, deleted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,"
+                " ?, ?, ?)",
+                (
+                    record.id,
+                    record.title.strip(),
+                    record.body,
+                    spec.id,
+                    state.id,
+                    state.category.value,
+                    self._project_id(conn, record.project),
+                    self._rank(conn, Placement.BOTTOM, None),
+                    Store.dumps(self._merge_metadata({}, record.metadata)),
+                    record.created_by,
+                    Clock.stamp(record.created_at),
+                    Clock.stamp(record.updated_at),
+                    record.archived_at and Clock.stamp(record.archived_at),
+                    record.deleted_at and Clock.stamp(record.deleted_at),
+                ),
+            )
+            self._set_labels(conn, record.id, add=record.labels, remove=())
+            for comment in record.comments:
+                conn.execute(
+                    "INSERT INTO comments (jot_id, author, body, kind, created_at)"
+                    " VALUES (?, ?, ?, ?, ?)",
+                    (
+                        record.id,
+                        comment.author,
+                        comment.body,
+                        comment.kind,
+                        Clock.stamp(comment.created_at),
+                    ),
+                )
+            self._event(conn, "jot.imported", record.id, 1, record.data)
+            return self.store.get_jot(record.id, include_deleted=True)
 
     # Internals --------------------------------------------------------------
 

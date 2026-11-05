@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 from tests.cli.test_cli import data, jot
@@ -108,3 +109,35 @@ class TestPluginCommands:
 
         monkeypatch.setattr("jot.plugins.host.Worker.run", interrupt)
         assert jot("plugin", "run") == ""
+
+
+@pytest.mark.usefixtures("home")
+class TestImportCommand:
+    """`jot import v01`."""
+
+    def test_dry_run_then_import(self, tmp_path: Path) -> None:
+        """The CLI reports, then imports, and refuses a second import."""
+        from tests.app.v01 import V01Builder  # noqa: PLC0415
+
+        db = V01Builder(tmp_path / "v01.db")
+        db.project("work")
+        task = db.task("Old task", status="review")
+        db.label(task, "Mixed Case")
+        db.cleanup()
+        source = str(db.close())
+        dry = jot("import", "v01", source, "--dry-run")
+        assert dry.startswith("Would import 1 jots")
+        assert "review -> doing: 1" in dry
+        assert "label 'Mixed Case' -> 'mixed-case'" in dry
+        assert "skipped 1 cleanup_proposals" in dry
+        assert "projects created: work" in dry
+        report = data("import", "v01", source, "--actor", "mike")
+        assert report["jots"] == 1  # ty: ignore[not-subscriptable]
+        shown = data("show", "1", "--with", "history")
+        assert shown["jot"]["labels"] == ["mixed-case", "review"]  # ty: ignore[not-subscriptable]
+        assert shown["history"][0]["origin"] == "import"  # ty: ignore[not-subscriptable]
+        jot("import", "v01", source, code=3)
+
+    def test_missing_source(self, tmp_path: Path) -> None:
+        """A missing file exits 1."""
+        jot("import", "v01", str(tmp_path / "nope.db"), code=1)

@@ -99,8 +99,8 @@ The plugin host serves each enabled plugin's UI module at `/api/plugins/<id>/ui.
 | --- | --- |
 | 1 | Core model, profiles, command API, CLI, skill |
 | 2 | HTTP API and a web UI shell with extension slots |
-| 3 (this release) | Plugin host: entry points, durable event delivery, jobs, plugin storage and settings, UI slots; first plugin is deterministic (`rules`) |
-| 4 | v0.1 importer |
+| 3 | Plugin host: entry points, durable event delivery, jobs, plugin storage and settings, UI slots; first plugin is deterministic (`rules`) |
+| 4 (this release) | v0.1 importer (`jot import v01`) |
 | 5 | Harness contract plugin plus Claude, Codex, Copilot, and fake implementations |
 | 6 | Triage plugin (`triaging` → `triaged`) |
 | 7 | Cutover from v0.1 |

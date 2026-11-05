@@ -41,7 +41,7 @@ jot add "my first jot"
 jot install-skills --target claude --target codex --target copilot
 ```
 
-Data lives in `~/.jot` by default, and `JOT_HOME` overrides it. A v0.1 database cannot be opened by v0.2, so use a new `JOT_HOME` until the importer lands.
+Data lives in `~/.jot` by default, and `JOT_HOME` overrides it. A v0.1 database cannot be opened by v0.2; bring it over with `jot import v01` (see [Moving from v0.1](docs/user-guide.md#moving-from-v01)).
 
 ## Documentation
 

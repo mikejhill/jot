@@ -23,6 +23,7 @@ import typer
 from pydantic import JsonValue, ValidationError
 
 from jot.app.commands import JotPatch, Placement
+from jot.app.importer import V01Importer
 from jot.app.queries import JotFilter, Sort
 from jot.app.session import Session
 from jot.cli.output import Emittable, Output, Plain
@@ -110,6 +111,9 @@ class CommandLine:
         profiles.command("ls")(self.profile_ls)
         profiles.command("show")(self.profile_show)
         self.app.add_typer(profiles, name="profile")
+        imports = typer.Typer(no_args_is_help=True, help="Import from other systems")
+        imports.command("v01")(self.import_v01)
+        self.app.add_typer(imports, name="import")
         from jot.cli.plugins import PluginCommands  # noqa: PLC0415 - avoids a cycle
 
         PluginCommands(self).register(self.app)
@@ -629,6 +633,29 @@ class CommandLine:
         with self.session(json=json) as session:
             profile = session.profiles.get(profile_id)
         self.emit(profile, Output.profile(profile))
+
+    def import_v01(
+        self,
+        source: Annotated[Path, typer.Argument(help="Path to a Jot v0.1 jot.db")],
+        *,
+        dry_run: Annotated[
+            bool, typer.Option("--dry-run", help="Report without writing")
+        ] = False,
+        profile: Annotated[
+            str, typer.Option("--profile", "-p", help="Profile for imported tasks")
+        ] = "task",
+        actor: Actor = None,
+        json: Json = False,
+    ) -> None:
+        """Import a Jot v0.1 database (read-only) into this empty data home."""
+        context = self.context(actor, "import from jot v0.1").model_copy(
+            update={"origin": Origin.IMPORT}
+        )
+        with self.session(json=json) as session:
+            report = V01Importer(source, profile=profile).run(
+                session, context, dry_run=dry_run
+            )
+        self.emit(report, Output.import_report(report))
 
     def install_skills(
         self,
