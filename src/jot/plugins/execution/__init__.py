@@ -11,14 +11,15 @@ so lists and boards work without the plugin.
 from __future__ import annotations
 
 import os
+from importlib.resources import files
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, override
 
 import typer
 from pydantic import JsonValue
 
-from jot.core.models import Origin, WriteContext
-from jot.exceptions import AppError, ConflictError, InvalidInputError
+from jot.core.models import Metadata, Origin, WriteContext
+from jot.exceptions import AppError, ConflictError, InvalidInputError, NotFoundError
 from jot.plugins.api import JobStatus, Plugin
 from jot.plugins.execution.claims import (
     CATEGORY,
@@ -43,11 +44,10 @@ from jot.plugins.execution.runner import (
 )
 from jot.plugins.execution.workspace import Workspace
 from jot.plugins.harness import SERVICE
-from jot.plugins.harness.api import HarnessEvent, integer, obj, text_of
+from jot.plugins.harness.api import JSON, HarnessEvent, integer, obj, text_of
 
 if TYPE_CHECKING:
     from jot.app.commands import Commands
-    from jot.core.models import Metadata
     from jot.plugins.api import Job, PluginCli
     from jot.plugins.context import PluginContext
     from jot.plugins.host import PluginHost
@@ -113,18 +113,33 @@ class ExecutionPlugin(Plugin):
         """``jot work ...``."""
         return WorkCommands(cli).app()
 
+    @override
+    def action(
+        self, name: str, body: Metadata, host: PluginHost, context: WriteContext
+    ) -> JsonValue:
+        """Runner actions for the web UI and API; runs are always queued."""
+        return Actions(Control(host, context.actor, context.origin)).call(name, body)
+
+    @override
+    def ui_module(self) -> str | None:
+        """The drawer panel and phase badges."""
+        return files(__package__ or __name__).joinpath("ui.js").read_text("utf-8")
+
 
 class Control:
     """Owner and runner actions shared by the CLI and (later) the HTTP API."""
 
-    def __init__(self, host: PluginHost, actor: str) -> None:
+    def __init__(
+        self, host: PluginHost, actor: str, origin: Origin = Origin.CLI
+    ) -> None:
         if not host.status(PLUGIN).enabled:
             raise InvalidInputError(
                 "Execution is off; run `jot plugin enable execution`"
             )
         self.host = host
         self.actor = actor
-        self.claims = Claims(host.session)
+        self.origin = origin
+        self.claims = Claims(host.session, origin=origin)
 
     @property
     def settings(self) -> ExecutionSettings:
@@ -137,7 +152,7 @@ class Control:
     def commands(self, reason: str) -> Commands:
         """Commands attributed to the owner."""
         return self.host.session.commands(
-            WriteContext(actor=self.actor, origin=Origin.CLI, reason=reason)
+            WriteContext(actor=self.actor, origin=self.origin, reason=reason)
         )
 
     @staticmethod
@@ -362,9 +377,75 @@ class Control:
                 str(Workspace.check_repo(Path(default).expanduser())) if default else ""
             )
         self.host.configure(
-            PLUGIN, values, WriteContext(actor=self.actor, origin=Origin.CLI)
+            PLUGIN, values, WriteContext(actor=self.actor, origin=self.origin)
         )
         return self.settings
+
+
+class Actions:
+    """``POST /api/plugins/execution/actions/<name>`` with ``{"jot": id, ...}``."""
+
+    NAMES = (
+        "state",
+        "run",
+        "approve",
+        "answer",
+        "send_back",
+        "retry",
+        "cancel",
+        "log",
+    )
+    TAIL = 200
+
+    def __init__(self, control: Control) -> None:
+        self.control = control
+
+    @staticmethod
+    def jot_id(body: Metadata) -> int:
+        """The jot the action is about."""
+        jot_id = integer(body.get("jot"))
+        if jot_id is None:
+            raise InvalidInputError('Give the jot as {"jot": <id>}')
+        return jot_id
+
+    @staticmethod
+    def text(body: Metadata, key: str) -> str:
+        """A required text field."""
+        value = text_of(body.get(key)).strip()
+        if not value:
+            raise InvalidInputError(f"{key} is required")
+        return value
+
+    def call(self, name: str, body: Metadata) -> JsonValue:
+        """Dispatch one action; return the jot's state (or log events)."""
+        if name not in self.NAMES:
+            raise NotFoundError(f"Execution has no action {name!r}")
+        jot_id = self.jot_id(body)
+        control = self.control
+        if name == "log":
+            tail = integer(body.get("tail")) or self.TAIL
+            events = control.log(jot_id)[-tail:]
+            return [
+                event.model_dump(mode="json", exclude_defaults=True) for event in events
+            ]
+        if name == "run":
+            state = control.start(jot_id, direct=body.get("direct") is True)
+        elif name == "approve":
+            state = control.approve(jot_id)
+        elif name == "answer":
+            question = integer(body.get("question"))
+            if question is None:
+                raise InvalidInputError("question (a comment id) is required")
+            state = control.answer(jot_id, question, self.text(body, "text"))
+        elif name == "send_back":
+            state = control.send_back(jot_id, self.text(body, "note"))
+        elif name == "retry":
+            state = control.retry(jot_id)
+        elif name == "cancel":
+            state = control.cancel(jot_id)
+        else:
+            state = control.claims.state(jot_id)
+        return JSON.validate_python(state.model_dump(mode="json"))
 
 
 def record_ids(value: JsonValue) -> list[int]:

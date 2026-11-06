@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import urllib.request
+from pathlib import Path
 
 import pytest
 from playwright.sync_api import Page, expect
 from tests.e2e.conftest import LiveServer
+from tests.plugins.test_execution_runner import make_repo
 
 pytestmark = pytest.mark.e2e
 
@@ -307,3 +309,64 @@ class TestPlugins:
         panel.get_by_label("Enabled").uncheck()
         expect(panel).not_to_contain_text("Behind by")
         assert api(live, "GET", "/plugins/rules")["enabled"] is False  # ty: ignore[not-subscriptable]
+
+
+class TestExecutionPanel:
+    """The execution plugin's drawer panel drives the runner."""
+
+    def test_plan_approve_review(
+        self, page: Page, live: LiveServer, tmp_path: Path
+    ) -> None:
+        """Plan, approve, and see the result and log from the browser."""
+        repo = make_repo(tmp_path / "repo")
+        for plugin_id in ("harness", "harness-fake", "execution"):
+            api(live, "PATCH", f"/plugins/{plugin_id}", {"enabled": True})
+        plan = {"summary": "Greet.", "plan": "1. Edit README", "questions": []}
+        api(
+            live,
+            "PATCH",
+            "/plugins/harness-fake",
+            {"settings": {"reply": json.dumps(plan)}},
+        )
+        api(
+            live,
+            "PATCH",
+            "/plugins/execution",
+            {"settings": {"default_repo": str(repo)}},
+        )
+        api(live, "POST", "/jots", {"title": "Say hello", "profile": "task"})
+        page.goto("/#/jot/1/list")
+        drawer = page.get_by_role("dialog", name="Jot 1")
+        panel = drawer.locator(".execution")
+        expect(panel.get_by_test_id("execution-phase")).to_have_text("idle")
+        panel.locator("summary").click()
+        panel.get_by_role("button", name="Plan").click()
+        expect(panel.get_by_test_id("execution-phase")).to_have_text(
+            "awaiting approval", timeout=15_000
+        )
+        expect(panel.get_by_label("Plan")).to_contain_text("Edit README")
+        expect(page.get_by_role("list", name="Jots")).to_contain_text(
+            "awaiting approval"
+        )
+        done = {
+            "summary": "Edited README.",
+            "verification": "read it back",
+            "outcome": "completed",
+            "questions": [],
+        }
+        api(
+            live,
+            "PATCH",
+            "/plugins/harness-fake",
+            {"settings": {"reply": json.dumps(done), "files": {"README.md": "hi"}}},
+        )
+        panel.get_by_role("button", name="Approve plan").click()
+        expect(panel.get_by_test_id("execution-phase")).to_have_text(
+            "review", timeout=15_000
+        )
+        expect(panel.get_by_label("Result")).to_contain_text("jot/1-say-hello")
+        panel.get_by_role("button", name="Show log").click()
+        expect(panel.get_by_label("Run log")).to_contain_text("[result]")
+        panel.get_by_label("Send back note").fill("")
+        panel.get_by_role("button", name="Send back").click()
+        expect(panel.get_by_test_id("execution-phase")).to_have_text("review")

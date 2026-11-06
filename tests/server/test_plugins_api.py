@@ -94,6 +94,14 @@ class TestPluginRoutes:
         assert response.headers["content-type"].startswith("text/javascript")
         assert "export default function setup" in response.text
 
+    def test_actions(self, client: TestClient) -> None:
+        """Actions reach enabled plugins; errors map to HTTP statuses."""
+        ok(client.post("/api/plugins/recorder/actions/x", json={}), 422)
+        client.patch("/api/plugins/recorder", json={"enabled": True})
+        error = ok(client.post("/api/plugins/recorder/actions/x"), 404)
+        assert "has no action" in str(error["error"])
+        ok(client.post("/api/plugins/nope/actions/x"), 404)
+
     def test_failures(self, client: TestClient, home: JotHome) -> None:
         """Skipped events are listed per plugin."""
         assert items(client.get("/api/plugins/recorder/failures")) == []

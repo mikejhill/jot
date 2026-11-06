@@ -90,3 +90,7 @@ nav a[aria-current="page"] { background: var(--surface); color: var(--text); bor
 .jobs .job { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 12px; }
 .job-failed { color: var(--danger); } .job-done { color: var(--done); } .job-running { color: var(--active); }
 .rules-list { margin: 0; padding-left: 20px; }
+.execution summary { cursor: pointer; } .execution summary h3 { display: inline; }
+.execution pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow: auto; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 8px; font-size: 13px; }
+.execution .question { display: flex; flex-direction: column; gap: 4px; margin: 8px 0; }
+.pill.phase { color: var(--active); border-color: var(--active); }

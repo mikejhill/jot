@@ -164,7 +164,7 @@ Settings: `profiles` (which profiles to triage, empty means all), `guidance` (in
 
 ## Execution
 
-`execution` lets agents work jots safely: external agents in their own sessions use claims, and Jot's own runner plans and executes jots through the harness. See the [design](https://claude.ai/artifact/Hz6i9sk6T5gPLSLgWw3gMm) for the full plan; this release ships claims, the runner, and the autonomy contract (the UI and drawdown come next).
+`execution` lets agents work jots safely: external agents in their own sessions use claims, and Jot's own runner plans and executes jots through the harness. See the [design](https://claude.ai/artifact/Hz6i9sk6T5gPLSLgWw3gMm) for the full plan; this release ships claims, the runner, the autonomy contract, and the web UI panel (drawdown comes next).
 
 ### Claims (external agents)
 
@@ -214,6 +214,10 @@ Without `--now`, runs are plugin jobs, picked up by `jot serve` or `jot plugin r
 - **Failures:** harness and git errors retry with backoff (3 attempts); the last failure moves the jot to `needs-input` with an `execution.note`. A job whose claim was lost or cancelled stops without writing.
 - **Logs:** every event of a run is written to `<JOT_HOME>/plugins/execution/runs/<jot>-<phase>-<job>-<time>.jsonl`.
 - **Settings:** `repos`, `default_repo`, `worktree_root`, `allow_shell`, `plan_guidance`, `execute_guidance`, `lease_seconds`, plus the contract settings below. Nothing is pushed or published; the guidance tells the agent so.
+
+### Web UI and HTTP
+
+The jot drawer gets an **Execution** panel: phase, holder, outcome, branch and cost; Plan, Run directly, Execute, Cancel and Retry buttons; answer boxes for open questions; the plan with Approve, the result, a Send back note, and the run log. Lists and boards show a phase badge. The panel calls `POST /api/plugins/execution/actions/<name>` with `{"jot": <id>, ...}`: `state`, `run` (`direct`), `approve`, `answer` (`question`, `text`), `send_back` (`note`), `retry`, `cancel`, and `log` (`tail`). Runs started over HTTP are always queued for the worker (`jot serve` runs one).
 
 ### Autonomy contract
 
@@ -291,6 +295,10 @@ class DigestPlugin(Plugin):
 | `listens` | `False` skips the event feed entirely, for plugins that only provide services. |
 | `commands(cli)` | Return a Typer app to mount as `jot <id> ...` (or `jot <command> ...` when the class sets `command`). `cli.host(json=...)` opens the data home with a plugin host; `cli.emit(value, text)` prints JSON or text. |
 | `api` | Targets host API `1`. A mismatch makes the plugin show as broken. |
+
+### Actions
+
+`action(name, body, host, context)` handles `POST /api/plugins/<id>/actions/<name>` with a JSON body, for buttons in the plugin's UI module or other clients. `context` carries the caller's actor and origin (from the `X-Jot-*` headers); the host refuses actions on disabled plugins and maps `AppError`s to HTTP statuses (404 for `NotFoundError`, 409 for conflicts, 422 otherwise). The default raises `NotFoundError`.
 
 ### UI
 
