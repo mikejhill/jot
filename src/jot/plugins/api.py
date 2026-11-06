@@ -101,6 +101,7 @@ class Plugin:
     events: ClassVar[frozenset[str]] = frozenset[str]()
     skip_own: ClassVar[bool] = True
     listens: ClassVar[bool] = True
+    command: ClassVar[str] = ""  # name of the CLI group; empty = the plugin id
     settings_model: ClassVar[type[BaseModel]] = NoSettings
     provides: ClassVar[frozenset[str]] = frozenset[str]()
     requires: ClassVar[frozenset[str]] = frozenset[str]()
@@ -122,7 +123,7 @@ class Plugin:
 
     @classmethod
     def commands(cls, cli: PluginCli) -> typer.Typer | None:
-        """Return a Typer app mounted as ``jot <id> ...``, if any."""
+        """Return a Typer app mounted as ``jot <command or id> ...``, if any."""
         del cli
         return None
 

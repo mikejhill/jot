@@ -62,11 +62,15 @@ class PluginCommands:
     def mount(self, app: typer.Typer, taken: set[str]) -> None:
         """Mount each installed plugin's own commands as ``jot <id> ...``."""
         for plugin_id, entry in sorted(self.catalog.entries.items()):
-            if entry.plugin is None or plugin_id in taken:
+            if entry.plugin is None:
+                continue
+            name = entry.plugin.command or plugin_id
+            if name in taken:
                 continue
             group = entry.plugin.commands(self)
             if group is not None:
-                app.add_typer(group, name=plugin_id)
+                taken.add(name)
+                app.add_typer(group, name=name)
 
     @contextmanager
     def host(self, *, json: bool) -> Iterator[PluginHost]:

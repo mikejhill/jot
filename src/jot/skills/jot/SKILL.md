@@ -44,6 +44,7 @@ jot plugin config <id> [--set '<json>']                # settings
 jot job ls [--status failed] --json                    # plugin background jobs
 jot harness ls --json ; jot harness check <id>        # AI backends (harness plugins)
 jot triage run <id> [--now]                            # AI triage (labels triaging -> triaged)
+jot work next|claim|heartbeat|release|approve|state    # agent queue (execution plugin)
 ```
 
 Exit codes: 0 ok, 1 invalid input or config, 2 not found, 3 version conflict.
@@ -53,4 +54,21 @@ Exit codes: 0 ok, 1 invalid input or config, 2 not found, 3 version conflict.
 - **Capture:** one `jot add` per idea. Keep it short; let the user's words stand. Add project/labels only when obvious.
 - **What's next:** `jot ls -c open -c active -n 10 --json`, then summarize the top few in rank order.
 - **Groom:** propose changes as a list (id, change, reason), apply after approval with `--if-version`.
-- **Work an item:** read it with `show --with comments,links`, move it to an `active` status, comment progress, and move it to a `done` status when the user accepts the result.
+- **Work an item:** if the `execution` plugin is enabled (`jot plugin ls`), use the claim flow below; otherwise read it with `show --with comments,links`, move it to an `active` status, comment progress, and move it to a `done` status when the user accepts the result.
+
+## Work a jot as an agent (execution plugin)
+
+Several agents may work the list at once: **claim before working, never touch a jot someone else holds.**
+
+```bash
+AGENT="claude-$(date +%s)"                          # one stable name per session
+jot work next -n 5 --json                           # ready: unclaimed, unblocked, not waiting on the owner
+jot work claim <id> --agent "$AGENT" --json         # exit 3 = someone else holds it: pick another
+jot work heartbeat <id> --agent "$AGENT"            # every ~10 minutes while working (lease default 30 min)
+```
+
+- **Planning** (the default after a claim): investigate read-only, then `jot comment <id> --kind execution.plan "<steps, files, verification, rollback>"`, and `jot work release <id> -a "$AGENT" --phase awaiting_approval`. **Stop** until the user runs `jot work approve <id>`.
+- **Questions** (any phase): one `jot comment <id> --kind execution.question "<question>"` each, then `--phase needs_input`. Stop.
+- **Executing** (claim again after approval, or `claim --direct` when the user says to skip planning): do the work on a branch `jot/<id>-<slug>`, verify it, commit, don't push unless asked. Then `jot comment <id> --kind execution.result "<what changed, how verified, branch>"` and `--phase review`.
+- Never move a jot to done yourself unless the user says so (`--phase done`).
+
