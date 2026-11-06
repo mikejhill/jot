@@ -533,6 +533,7 @@ class FakeSettings(Record):
     canned: Metadata = Field(default_factory=dict)
     reply: str = "Done."
     fail: bool = False
+    cost_usd: float | None = None
     files: dict[str, str] = Field(
         default_factory=dict,
         description="Files to write in the working directory on writable runs",
@@ -590,8 +591,11 @@ class FakeHarness(Harness):
                 yield HarnessEvent(kind=EventKind.TOOL, text=f"Write {name}")
         yield HarnessEvent(kind=EventKind.TEXT, text=self.settings.reply)
         yield HarnessEvent(
-            kind=EventKind.USAGE, model=model, usage=Usage(input=10, output=5)
+            kind=EventKind.USAGE,
+            model=model,
+            usage=Usage(input=10, output=5, cost_usd=self.settings.cost_usd),
         )
+        yield HarnessEvent(kind=EventKind.TEXT, text="Wrapping up.")
         yield HarnessEvent(
             kind=EventKind.RESULT,
             text=self.settings.reply,

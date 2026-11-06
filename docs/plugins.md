@@ -164,7 +164,7 @@ Settings: `profiles` (which profiles to triage, empty means all), `guidance` (in
 
 ## Execution
 
-`execution` lets agents work jots safely: external agents in their own sessions use claims, and Jot's own runner plans and executes jots through the harness. See the [design](https://claude.ai/artifact/Hz6i9sk6T5gPLSLgWw3gMm) for the full plan; this release ships claims and the runner (the autonomy contract, UI, and drawdown come next).
+`execution` lets agents work jots safely: external agents in their own sessions use claims, and Jot's own runner plans and executes jots through the harness. See the [design](https://claude.ai/artifact/Hz6i9sk6T5gPLSLgWw3gMm) for the full plan; this release ships claims, the runner, and the autonomy contract (the UI and drawdown come next).
 
 ### Claims (external agents)
 
@@ -213,7 +213,23 @@ Without `--now`, runs are plugin jobs, picked up by `jot serve` or `jot plugin r
 - **Execute:** the agent runs in a git worktree at `<worktree_root>/<repo>/<id>-<slug>` (default root `<JOT_HOME>/worktrees`) on branch `jot/<id>-<slug>`, created from the repository's HEAD and reused across attempts (action `execution.run`). It runs at `workspace_write`, or `full` (with a shell, so it can run tests) for projects listed in `allow_shell`; the harness router's `max_permission` must allow that. Changes to tracked files it leaves uncommitted are committed for it; untracked files are listed in the result, not committed. The `execution.result` comment carries the outcome, verification, branch, commits, and diffstat, and the jot moves to `review`. Rework resumes the same agent session when the harness supports it.
 - **Failures:** harness and git errors retry with backoff (3 attempts); the last failure moves the jot to `needs-input` with an `execution.note`. A job whose claim was lost or cancelled stops without writing.
 - **Logs:** every event of a run is written to `<JOT_HOME>/plugins/execution/runs/<jot>-<phase>-<job>-<time>.jsonl`.
-- **Settings:** `repos`, `default_repo`, `worktree_root`, `allow_shell`, `plan_guidance`, `execute_guidance`, `lease_seconds`. Nothing is pushed or published; the guidance tells the agent so.
+- **Settings:** `repos`, `default_repo`, `worktree_root`, `allow_shell`, `plan_guidance`, `execute_guidance`, `lease_seconds`, plus the contract settings below. Nothing is pushed or published; the guidance tells the agent so.
+
+### Autonomy contract
+
+| Rule | Default | Behavior |
+| --- | --- | --- |
+| Cost per attempt | `max_cost_usd: 2` | Reported cost is added up; past the cap the run stops at its next step (never discarding a finished one), tracked changes are committed as partial work, and the jot moves to `needs-input` with outcome `capped`. Runtimes that report no cost (estimates, premium requests) are not capped by cost. |
+| Time per attempt | `max_minutes: 30` | Checked at each step of the run. |
+| Spend per day | `daily_cost_usd: 20` | Spend is kept per UTC day in the plugin's state; new runs are refused once it is used up. |
+| Approval binding | always | An approval names the plan revision (plan comment plus a hash of title and body). Editing the title or body after approval, or a new plan, sends the jot back to `awaiting-approval`. Direct runs skip this. |
+| Evidence | always | A `completed` result must say how it was verified; otherwise it becomes `needs_more_work`. Without `allow_shell`, results say they are unverified and `metadata.execution.verified` is false. |
+| Repair cycles | `repair_cycles: 2` | A `needs_more_work` result is sent back to the agent automatically up to this many times before review. |
+| Repeated errors | always | Two attempts in a row failing with the same error stop retrying. |
+| Skip planning | `direct_projects: []`, `direct_label: direct` | Jots in these projects or with this label run directly; `--direct` does the same per run. |
+| Lost lease | always | A background thread extends the job lease and the claim; if either is lost (cancel, takeover) the run stops before writing. |
+
+## Writing a plugin
 
 ## Writing a plugin
 
