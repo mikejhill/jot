@@ -222,6 +222,17 @@ class ExecutionSettings(Record):
     direct_label: str = Field(
         default="direct", description="Jots with this label skip planning"
     )
+    drawdown: bool = Field(
+        default=False,
+        description="Work ready jots unattended, one at a time, in rank order",
+    )
+    drawdown_projects: list[str] = Field(
+        default_factory=list,
+        description="Projects drawdown may start (empty: every mapped project)",
+    )
+    concurrency: int = Field(
+        default=1, ge=1, le=8, description="Runs drawdown keeps going at once"
+    )
 
 
 class Runner:

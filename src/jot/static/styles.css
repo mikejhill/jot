@@ -94,3 +94,4 @@ nav a[aria-current="page"] { background: var(--surface); color: var(--text); bor
 .execution pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow: auto; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 8px; font-size: 13px; }
 .execution .question { display: flex; flex-direction: column; gap: 4px; margin: 8px 0; }
 .pill.phase { color: var(--active); border-color: var(--active); }
+.needs-you { list-style: none; padding: 0; display: flex; flex-direction: column; gap: 8px; }

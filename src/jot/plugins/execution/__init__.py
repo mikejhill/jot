@@ -35,6 +35,7 @@ from jot.plugins.execution.claims import (
     WorkState,
 )
 from jot.plugins.execution.contract import CapError
+from jot.plugins.execution.drawdown import DRAWDOWN, Drawdown, Inbox
 from jot.plugins.execution.runner import (
     AGENT,
     ExecutionSettings,
@@ -47,7 +48,10 @@ from jot.plugins.harness import SERVICE
 from jot.plugins.harness.api import JSON, HarnessEvent, integer, obj, text_of
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from jot.app.commands import Commands
+    from jot.core.models import Event
     from jot.plugins.api import Job, PluginCli
     from jot.plugins.context import PluginContext
     from jot.plugins.host import PluginHost
@@ -81,7 +85,7 @@ class ExecutionPlugin(Plugin):
     name = "Execution"
     version = "2"
     description = "Supervised agent work: claims, plans, approval, worktrees."
-    listens = False
+    skip_own = True
     command = "work"
     settings_model = ExecutionSettings
 
@@ -96,16 +100,27 @@ class ExecutionPlugin(Plugin):
     @override
     def run(self, job: Job, context: PluginContext) -> JsonValue:
         """Run one plan or execute job."""
+        settings = self.options(context)
+        if job.kind == DRAWDOWN:
+            return Drawdown(context, settings).run()
         if job.jot_id is None or job.kind not in {PLAN, EXECUTE}:
             return {"skipped": f"unknown job {job.kind}"}
-        runner = Runner(context, self.options(context))
-        return Control.attempt(
-            runner,
-            job.jot_id,
-            job.kind,
-            direct=job.payload.get("direct") is True,
-            last=job.attempts >= job.max_attempts,
-        )
+        runner = Runner(context, settings)
+        try:
+            return Control.attempt(
+                runner,
+                job.jot_id,
+                job.kind,
+                direct=job.payload.get("direct") is True,
+                last=job.attempts >= job.max_attempts,
+            )
+        finally:
+            Drawdown.kick(context, settings)
+
+    @override
+    def handle(self, event: Event, context: PluginContext) -> None:
+        """Owner changes (new jots, answers, approvals, settings) wake drawdown."""
+        Drawdown.kick(context, self.options(context))
 
     @classmethod
     @override
@@ -386,6 +401,7 @@ class Actions:
     """``POST /api/plugins/execution/actions/<name>`` with ``{"jot": id, ...}``."""
 
     NAMES = (
+        "inbox",
         "state",
         "run",
         "approve",
@@ -417,35 +433,46 @@ class Actions:
         return value
 
     def call(self, name: str, body: Metadata) -> JsonValue:
-        """Dispatch one action; return the jot's state (or log events)."""
+        """Dispatch one action; return the jot's state (or a list)."""
         if name not in self.NAMES:
             raise NotFoundError(f"Execution has no action {name!r}")
-        jot_id = self.jot_id(body)
         control = self.control
+        if name == "inbox":
+            waiting = Inbox(control.host.session).waiting()
+            return JSON.validate_python([w.model_dump(mode="json") for w in waiting])
+        jot_id = self.jot_id(body)
         if name == "log":
             tail = integer(body.get("tail")) or self.TAIL
             events = control.log(jot_id)[-tail:]
-            return [
-                event.model_dump(mode="json", exclude_defaults=True) for event in events
-            ]
-        if name == "run":
-            state = control.start(jot_id, direct=body.get("direct") is True)
-        elif name == "approve":
-            state = control.approve(jot_id)
-        elif name == "answer":
-            question = integer(body.get("question"))
-            if question is None:
-                raise InvalidInputError("question (a comment id) is required")
-            state = control.answer(jot_id, question, self.text(body, "text"))
-        elif name == "send_back":
-            state = control.send_back(jot_id, self.text(body, "note"))
-        elif name == "retry":
-            state = control.retry(jot_id)
-        elif name == "cancel":
-            state = control.cancel(jot_id)
-        else:
-            state = control.claims.state(jot_id)
+            return JSON.validate_python(
+                [e.model_dump(mode="json", exclude_defaults=True) for e in events]
+            )
+        state = self.change(name, jot_id, body)
         return JSON.validate_python(state.model_dump(mode="json"))
+
+    def change(self, name: str, jot_id: int, body: Metadata) -> WorkState:
+        """Run one state-changing action (or read the state)."""
+        control = self.control
+        actions: dict[str, Callable[[], WorkState]] = {
+            "run": lambda: control.start(jot_id, direct=body.get("direct") is True),
+            "approve": lambda: control.approve(jot_id),
+            "answer": lambda: control.answer(
+                jot_id, self.question(body), self.text(body, "text")
+            ),
+            "send_back": lambda: control.send_back(jot_id, self.text(body, "note")),
+            "retry": lambda: control.retry(jot_id),
+            "cancel": lambda: control.cancel(jot_id),
+        }
+        action = actions.get(name)
+        return action() if action is not None else control.claims.state(jot_id)
+
+    @staticmethod
+    def question(body: Metadata) -> int:
+        """The question comment id."""
+        question = integer(body.get("question"))
+        if question is None:
+            raise InvalidInputError("question (a comment id) is required")
+        return question
 
 
 def record_ids(value: JsonValue) -> list[int]:
@@ -505,6 +532,8 @@ class WorkCommands:
             ("log", self.log),
             ("repos", self.repos),
             ("clean", self.clean),
+            ("inbox", self.inbox),
+            ("drawdown", self.drawdown),
         ):
             app.command(name)(command)
         return app
@@ -751,3 +780,39 @@ class WorkCommands:
             workspace = Control(host, self.actor()).clean(jot_id, force=force)
             state = Claims(host.session).state(jot_id)
         self.cli.emit(state, f"Removed {workspace.path}\n")
+
+    def inbox(
+        self,
+        *,
+        limit: Annotated[int, typer.Option("-n", help="How many")] = 50,
+        json: Json = False,
+    ) -> None:
+        """Jots waiting on you: questions, plans to approve, results to review."""
+        with self.cli.host(json=json) as host:
+            Control(host, self.actor())
+            waiting = Inbox(host.session).waiting(limit)
+        lines = [f"{w.jot_id:>5}  {w.reason:<24} {w.title}\n" for w in waiting]
+        self.cli.emit(waiting, "".join(lines) or "Nothing waiting on you\n")
+
+    def drawdown(
+        self,
+        state: Annotated[
+            str | None, typer.Argument(help="on or off (omit to show)")
+        ] = None,
+        *,
+        json: Json = False,
+    ) -> None:
+        """Turn unattended drawdown on or off."""
+        if state not in {None, "on", "off"}:
+            raise typer.BadParameter("Use on or off")
+        with self.cli.host(json=json) as host:
+            control = Control(host, self.actor())
+            settings = control.settings
+            if state is not None:
+                values = settings.model_dump(mode="json") | {"drawdown": state == "on"}
+                host.configure(
+                    PLUGIN, values, WriteContext(actor=self.actor(), origin=Origin.CLI)
+                )
+                settings = control.settings
+        text = f"Drawdown is {'on' if settings.drawdown else 'off'}\n"
+        self.cli.emit(settings, text)

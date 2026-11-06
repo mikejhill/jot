@@ -370,3 +370,7 @@ class TestExecutionPanel:
         panel.get_by_label("Send back note").fill("")
         panel.get_by_role("button", name="Send back").click()
         expect(panel.get_by_test_id("execution-phase")).to_have_text("review")
+        page.get_by_role("link", name="Needs you").click()
+        waiting = page.get_by_role("list", name="Needs you")
+        expect(waiting).to_contain_text("#1 Say hello")
+        expect(waiting).to_contain_text("review a result")
