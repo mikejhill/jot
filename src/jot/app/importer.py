@@ -11,7 +11,9 @@ event.
 from __future__ import annotations
 
 import re
+import shutil
 import sqlite3
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -112,23 +114,30 @@ class V01Importer:
     # Reading ----------------------------------------------------------------
 
     def read(self) -> Snapshot:
-        """Read every table needed, without writing to the source."""
+        """Read every table needed from a private copy, never touching the source.
+
+        Even a read-only SQLite connection creates ``-shm``/``-wal`` files beside a
+        WAL-mode database, so the database (and its WAL, if any) is copied to a
+        temporary folder first and read there.
+        """
         if not self.source.is_file():
             raise InvalidInputError(f"No v0.1 database at {self.source}")
-        uri = f"{self.source.resolve().as_uri()}?mode=ro"
-        try:
-            connection = sqlite3.connect(uri, uri=True)
-        except sqlite3.Error as err:  # pragma: no cover - is_file() checked above
-            raise RepositoryError(f"Cannot open {self.source}: {err}") from err
-        connection.row_factory = sqlite3.Row
-        try:
-            return self._snapshot(connection)
-        except sqlite3.Error as err:
-            raise RepositoryError(
-                f"Cannot read {self.source} as a Jot v0.1 database: {err}"
-            ) from err
-        finally:
-            connection.close()
+        with tempfile.TemporaryDirectory(prefix="jot-import-") as scratch:
+            copy = Path(scratch) / "source.db"
+            shutil.copyfile(self.source, copy)
+            wal = self.source.with_name(f"{self.source.name}-wal")
+            if wal.is_file():
+                shutil.copyfile(wal, copy.with_name("source.db-wal"))
+            connection = sqlite3.connect(copy)
+            connection.row_factory = sqlite3.Row
+            try:
+                return self._snapshot(connection)
+            except sqlite3.Error as err:
+                raise RepositoryError(
+                    f"Cannot read {self.source} as a Jot v0.1 database: {err}"
+                ) from err
+            finally:
+                connection.close()
 
     def _snapshot(self, connection: sqlite3.Connection) -> Snapshot:
         """Collect rows into plain records."""
