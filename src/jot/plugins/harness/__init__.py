@@ -149,6 +149,11 @@ class HarnessService:
         self.check_model(selected)
         return Selection(harness=chosen, model=selected)
 
+    def resumable(self, action: str | None = None) -> bool:
+        """Whether the backend chosen for ``action`` can resume a session."""
+        selection = self.select(action)
+        return self.backends[selection.harness].capabilities().resume
+
     def check_model(self, model: str | None) -> None:
         """Refuse blocked models, and unlisted ones when an allow-list is set."""
         if model is None:

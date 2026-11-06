@@ -164,7 +164,9 @@ Settings: `profiles` (which profiles to triage, empty means all), `guidance` (in
 
 ## Execution
 
-`execution` lets agents (in their own sessions, or Jot's runner later) work jots safely. See the [design](https://claude.ai/artifact/Hz6i9sk6T5gPLSLgWw3gMm) for the full plan; this release ships claims.
+`execution` lets agents work jots safely: external agents in their own sessions use claims, and Jot's own runner plans and executes jots through the harness. See the [design](https://claude.ai/artifact/Hz6i9sk6T5gPLSLgWw3gMm) for the full plan; this release ships claims and the runner (the autonomy contract, UI, and drawdown come next).
+
+### Claims (external agents)
 
 ```bash
 jot plugin enable execution
@@ -189,6 +191,29 @@ A claim is stored in `metadata.execution` with the agent, lease expiry, and a ge
 | done | | done | |
 
 `jot work next` lists jots that are idle, approved, or running with an expired lease, not blocked by an open jot through a `blocks` link, and in a profile that allows `execution`. Jots imported from v0.1 with `review`, `awaiting-approval` or `needs-input` labels start in those phases.
+
+### The runner
+
+```bash
+jot plugin enable harness && jot plugin enable harness-claude
+jot work repos --set web=~/src/web               # project -> repository (or --from-import for v0.1 paths)
+jot work repos --default ~/src/scratch           # repository for jots without a mapped project
+jot work run 12 [--direct] [--now]               # plan (or execute directly); --now waits here
+jot work answer 12 <question comment id> "text"  # resumes once every question is answered
+jot work approve 12                              # runner plans queue execution
+jot work send-back 12 "smaller change please"    # re-plan a plan, or rework a result
+jot work retry 12 ; jot work cancel 12
+jot work log 12                                  # the latest run's events
+jot work clean 12 [--force]                      # remove the worktree; the branch stays
+```
+
+Without `--now`, runs are plugin jobs, picked up by `jot serve` or `jot plugin run`.
+
+- **Plan:** the agent runs at `read_only` in the repository (action `execution.plan`) and answers with a summary, a plan, and questions. Questions become `execution.question` comments and the jot moves to `needs-input`; otherwise the plan is an `execution.plan` comment, its revision (plan comment plus a hash of the title and body) is stored, and the jot moves to `awaiting-approval`.
+- **Execute:** the agent runs in a git worktree at `<worktree_root>/<repo>/<id>-<slug>` (default root `<JOT_HOME>/worktrees`) on branch `jot/<id>-<slug>`, created from the repository's HEAD and reused across attempts (action `execution.run`). It runs at `workspace_write`, or `full` (with a shell, so it can run tests) for projects listed in `allow_shell`; the harness router's `max_permission` must allow that. Changes to tracked files it leaves uncommitted are committed for it; untracked files are listed in the result, not committed. The `execution.result` comment carries the outcome, verification, branch, commits, and diffstat, and the jot moves to `review`. Rework resumes the same agent session when the harness supports it.
+- **Failures:** harness and git errors retry with backoff (3 attempts); the last failure moves the jot to `needs-input` with an `execution.note`. A job whose claim was lost or cancelled stops without writing.
+- **Logs:** every event of a run is written to `<JOT_HOME>/plugins/execution/runs/<jot>-<phase>-<job>-<time>.jsonl`.
+- **Settings:** `repos`, `default_repo`, `worktree_root`, `allow_shell`, `plan_guidance`, `execute_guidance`, `lease_seconds`. Nothing is pushed or published; the guidance tells the agent so.
 
 ## Writing a plugin
 

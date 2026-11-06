@@ -533,6 +533,10 @@ class FakeSettings(Record):
     canned: Metadata = Field(default_factory=dict)
     reply: str = "Done."
     fail: bool = False
+    files: dict[str, str] = Field(
+        default_factory=dict,
+        description="Files to write in the working directory on writable runs",
+    )
 
 
 class FakeHarness(Harness):
@@ -578,6 +582,12 @@ class FakeHarness(Harness):
         model = request.model or "fake-model"
         session = request.session_id or "fake-session"
         yield HarnessEvent(kind=EventKind.TOOL, text=f"Read {request.cwd}")
+        if request.permission != Permission.READ_ONLY:
+            for name, content in self.settings.files.items():
+                target = workdir(request.cwd) / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content, encoding="utf-8")
+                yield HarnessEvent(kind=EventKind.TOOL, text=f"Write {name}")
         yield HarnessEvent(kind=EventKind.TEXT, text=self.settings.reply)
         yield HarnessEvent(
             kind=EventKind.USAGE, model=model, usage=Usage(input=10, output=5)
