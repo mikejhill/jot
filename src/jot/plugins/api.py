@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, ClassVar, Protocol
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from jot.core.models import NAME, Clock, Metadata, Record
+from jot.exceptions import NotFoundError
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -23,7 +24,7 @@ if TYPE_CHECKING:
 
     import typer
 
-    from jot.core.models import Event, Jot
+    from jot.core.models import Event, Jot, WriteContext
     from jot.plugins.context import PluginContext
     from jot.plugins.host import PluginHost
 
@@ -116,6 +117,17 @@ class Plugin:
     def applies_to(self, jot: Jot) -> bool:
         """Return whether this plugin acts on a jot; the host also checks profiles."""
         return jot.deleted_at is None
+
+    def action(
+        self, name: str, body: Metadata, host: PluginHost, context: WriteContext
+    ) -> JsonValue:
+        """Handle ``POST /api/plugins/<id>/actions/<name>`` for clients.
+
+        ``context`` attributes the request (actor, origin). Raise ``AppError``
+        subclasses for bad input; the host maps them to HTTP statuses.
+        """
+        del body, host, context
+        raise NotFoundError(f"Plugin {self.id} has no action {name!r}")
 
     def service(self, name: str, context: PluginContext) -> object:
         """Return the object behind a service named in ``provides``."""

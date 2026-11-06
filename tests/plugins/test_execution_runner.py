@@ -10,10 +10,11 @@ from typing import TYPE_CHECKING
 import pytest
 from pydantic import JsonValue
 from tests.cli.test_cli import data, jot
-from tests.plugins.conftest import USER, FakeClock
+from tests.plugins.conftest import USER, FakeClock, Recorder
 
 from jot.app.commands import JotPatch
-from jot.exceptions import ConflictError, InvalidInputError
+from jot.core.models import Origin, WriteContext
+from jot.exceptions import ConflictError, InvalidInputError, NotFoundError, PluginError
 from jot.plugins.api import JobStatus
 from jot.plugins.execution import (
     AGENT,
@@ -966,3 +967,78 @@ class TestContract:
         assert Evidence.outcome("completed", " N/A ") == "needs_more_work"
         assert Evidence.outcome("completed", "pytest: 3 passed") == "completed"
         assert Evidence.outcome("cannot_proceed", "") == "cannot_proceed"
+
+
+class TestActions:
+    """Runner actions through the host, as the HTTP API calls them."""
+
+    UI = WriteContext(actor="mike", origin=Origin.UI)
+
+    def act(self, host: PluginHost, name: str, **body: JsonValue) -> JsonValue:
+        """Call one execution action."""
+        payload: Metadata = {**body}
+        return host.action("execution", name, payload, self.UI)
+
+    def phase(self, host: PluginHost, name: str, jot: int) -> JsonValue:
+        """The phase an action leaves the jot in."""
+        state = self.act(host, name, jot=jot)
+        assert isinstance(state, dict)
+        return state["phase"]
+
+    def test_flow(self, host: PluginHost, task: int, session: Session) -> None:
+        """Run, approve, send back, and read the log; runs are queued."""
+        reply(host, PLAN)
+        state = self.act(host, "run", jot=task)
+        assert isinstance(state, dict)
+        assert state["phase"] == "idle"
+        host.run_jobs()
+        assert self.phase(host, "state", task) == "awaiting_approval"
+        reply(host, DONE)
+        self.act(host, "approve", jot=task)
+        approval = session.queries.comments(task)[-1]
+        assert (approval.author, approval.kind) == ("mike", "execution.approval")
+        host.run_jobs()
+        events = self.act(host, "log", jot=task, tail=2)
+        assert isinstance(events, list)
+        assert len(events) == 2
+        self.act(host, "send_back", jot=task, note="more")
+        assert self.phase(host, "cancel", task) == "approved"
+        assert self.phase(host, "retry", task) == "approved"
+        history = session.queries.history(task)
+        assert any(e.actor == "mike" and e.origin == Origin.UI for e in history)
+
+    def test_answer(self, host: PluginHost, task: int, session: Session) -> None:
+        """Answers resume the run."""
+        reply(host, {**PLAN, "questions": ["Which?"]})
+        self.act(host, "run", jot=task)
+        host.run_jobs()
+        question = session.queries.comments(task)[-1].id
+        with pytest.raises(InvalidInputError, match="question"):
+            self.act(host, "answer", jot=task, text="x")
+        with pytest.raises(InvalidInputError, match="text is required"):
+            self.act(host, "answer", jot=task, question=question, text="  ")
+        reply(host, PLAN)
+        self.act(host, "answer", jot=task, question=question, text="this")
+        host.run_jobs()
+        assert Claims(session).state(task).phase == Phase.AWAITING_APPROVAL
+
+    def test_errors(self, host: PluginHost, session: Session, task: int) -> None:
+        """Unknown actions, missing ids, and disabled plugins are refused."""
+        with pytest.raises(NotFoundError, match="no action 'nope'"):
+            self.act(host, "nope", jot=task)
+        with pytest.raises(InvalidInputError, match="Give the jot"):
+            self.act(host, "state")
+        host.disable("execution", USER)
+        with pytest.raises(PluginError, match="not enabled"):
+            self.act(host, "state", jot=task)
+        other = PluginHost(session, PluginCatalog.of(Recorder))
+        other.enable("recorder", USER)
+        with pytest.raises(NotFoundError, match="has no action"):
+            other.action("recorder", "x", {}, self.UI)
+
+    def test_ui_module(self) -> None:
+        """The panel module registers a badge and a drawer panel."""
+        source = ExecutionPlugin().ui_module()
+        assert source is not None
+        assert "register('jot.panels'" in source
+        assert "register('jot.badges'" in source

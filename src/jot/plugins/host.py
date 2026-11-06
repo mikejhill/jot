@@ -347,6 +347,15 @@ class PluginHost:
             parts.append(f"{name}{hint}")
         return f"{plugin_id} requires {', '.join(parts)}"
 
+    def action(
+        self, plugin_id: str, name: str, body: Metadata, context: WriteContext
+    ) -> JsonValue:
+        """Run a client action on an enabled plugin."""
+        if not self.status(plugin_id).enabled:
+            raise PluginError(f"Plugin {plugin_id} is not enabled")
+        result = self.instance(plugin_id).action(name, body, self, context)
+        return JSON.validate_python(result)
+
     def context_for(
         self,
         plugin_id: str,

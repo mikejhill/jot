@@ -5,7 +5,7 @@ Jot is an information system with optional automation. The acceptance test for t
 ## Layers
 
 ```text
-plugins             rules · harness + harness-claude/codex/copilot/fake · triage · execution claims, runner, autonomy contract (shipped) · UI, drawdown (planned)
+plugins             rules · harness + harness-claude/codex/copilot/fake · triage · execution claims, runner, autonomy contract, UI (shipped) · drawdown (planned)
                          │ use only the plugin API: commands, queries, event feed, jobs, state, UI slots
 host                jot.plugins  discovery, durable delivery, jobs, settings, state, worker
 core                jot.core     records, profiles, rank            (pure, no I/O)
@@ -91,7 +91,7 @@ The UI (`src/jot/static/`) is Preact plus htm with no build step. It follows the
 | `jot.panels` | `({detail, refresh}) => vnode`: sections in the drawer |
 | `settings.pages` | `{id, label, render}`: sections on the settings page |
 
-The plugin host serves each enabled plugin's UI module at `/api/plugins/<id>/ui.js`. The UI imports it at startup, and it calls this registry through `setup(jot)`.
+The plugin host serves each enabled plugin's UI module at `/api/plugins/<id>/ui.js`. The UI imports it at startup, and it calls this registry through `setup(jot)`. Modules call back into their plugin through `POST /api/plugins/<id>/actions/<name>` (see [Plugins](plugins.md#actions)).
 
 ## Roadmap
 
@@ -104,4 +104,4 @@ The plugin host serves each enabled plugin's UI module at `/api/plugins/<id>/ui.
 | 5 | Harness contract plugin plus Claude, Codex, Copilot, and fake implementations; plugin services (`provides`/`requires`) and plugin CLI commands |
 | 6 | Triage plugin (`triaging` → `triaged`, never overwriting newer user edits) |
 | 7 | Cutover from v0.1 |
-| 8 (8a to 8c in this release) | Execution plugin ([design](https://claude.ai/artifact/Hz6i9sk6T5gPLSLgWw3gMm)): 8a claims, 8b runner, 8c autonomy contract, 8d UI and HTTP actions, 8e drawdown |
+| 8 (8a to 8d in this release) | Execution plugin ([design](https://claude.ai/artifact/Hz6i9sk6T5gPLSLgWw3gMm)): 8a claims, 8b runner, 8c autonomy contract, 8d UI and HTTP actions, 8e drawdown |

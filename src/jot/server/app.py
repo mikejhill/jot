@@ -12,10 +12,10 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, Header, Query, Request
+from fastapi import Body, Depends, FastAPI, Header, Query, Request
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, JsonValue, ValidationError
 from starlette.middleware.base import RequestResponseEndpoint
 
 from jot.app.commands import Commands
@@ -27,6 +27,7 @@ from jot.core.models import (
     Event,
     Jot,
     Link,
+    Metadata,
     Origin,
     Project,
     StatusCategory,
@@ -345,6 +346,16 @@ class ApiApplication:
             if source is None:
                 raise NotFoundError(f"Plugin {plugin_id!r} has no UI module")
             return Response(source, media_type="text/javascript")
+
+        @app.post("/api/plugins/{plugin_id}/actions/{name}")
+        def plugin_action(
+            plugin_id: str,
+            name: str,
+            host: Host,
+            context: Ctx,
+            body: Annotated[Metadata | None, Body()] = None,
+        ) -> JsonValue:
+            return host.action(plugin_id, name, body or {}, context)
 
         @app.get("/api/plugins/{plugin_id}/failures")
         def plugin_failures(plugin_id: str, host: Host) -> list[Failure]:
