@@ -164,7 +164,7 @@ Settings: `profiles` (which profiles to triage, empty means all), `guidance` (in
 
 ## Execution
 
-`execution` lets agents work jots safely: external agents in their own sessions use claims, and Jot's own runner plans and executes jots through the harness. See the [design](https://claude.ai/artifact/Hz6i9sk6T5gPLSLgWw3gMm) for the full plan; this release ships claims, the runner, the autonomy contract, and the web UI panel (drawdown comes next).
+`execution` lets agents work jots safely: external agents in their own sessions use claims, and Jot's own runner plans and executes jots through the harness. See the [design](https://claude.ai/artifact/Hz6i9sk6T5gPLSLgWw3gMm) for the full plan; this release ships all of it: claims, the runner, the autonomy contract, the web UI panel, and drawdown.
 
 ### Claims (external agents)
 
@@ -218,6 +218,15 @@ Without `--now`, runs are plugin jobs, picked up by `jot serve` or `jot plugin r
 ### Web UI and HTTP
 
 The jot drawer gets an **Execution** panel: phase, holder, outcome, branch and cost; Plan, Run directly, Execute, Cancel and Retry buttons; answer boxes for open questions; the plan with Approve, the result, a Send back note, and the run log. Lists and boards show a phase badge. The panel calls `POST /api/plugins/execution/actions/<name>` with `{"jot": <id>, ...}`: `state`, `run` (`direct`), `approve`, `answer` (`question`, `text`), `send_back` (`note`), `retry`, `cancel`, and `log` (`tail`). Runs started over HTTP are always queued for the worker (`jot serve` runs one).
+
+### Drawdown
+
+```bash
+jot work drawdown on        # off by default; `jot work drawdown` shows the state
+jot work inbox              # what waits on you: questions, plans, results, failed runs
+```
+
+With `drawdown` on, the plugin works the list by itself: a `drawdown` job picks the top-ranked ready jot (idle or approved, unclaimed, not blocked by an open jot, with a mapped repository that has no other run going) and queues its plan, or its execution when it is approved or direct. Another pass is queued when a run ends and whenever you change something (a new jot, an answer, an approval, settings), so ready jots run one after another in rank order while each owner checkpoint waits for you. `concurrency` (default 1) caps runs at once, `drawdown_projects` limits which projects it starts, and the daily spend cap pauses it. The web UI's **Needs you** view and `jot work inbox` list what waits on you.
 
 ### Autonomy contract
 

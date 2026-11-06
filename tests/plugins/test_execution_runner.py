@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import json
 import threading
 from pathlib import Path
@@ -12,7 +13,7 @@ from pydantic import JsonValue
 from tests.cli.test_cli import data, jot
 from tests.plugins.conftest import USER, FakeClock, Recorder
 
-from jot.app.commands import JotPatch
+from jot.app.commands import JotPatch, Placement
 from jot.core.models import Origin, WriteContext
 from jot.exceptions import ConflictError, InvalidInputError, NotFoundError, PluginError
 from jot.plugins.api import JobStatus
@@ -21,6 +22,7 @@ from jot.plugins.execution import (
     Claims,
     Control,
     ExecutionPlugin,
+    ExecutionSettings,
     Phase,
 )
 from jot.plugins.execution.contract import (
@@ -31,6 +33,7 @@ from jot.plugins.execution.contract import (
     Keepalive,
     today,
 )
+from jot.plugins.execution.drawdown import Drawdown, Inbox
 from jot.plugins.execution.runner import Answer, Question, RunLog, Runner, dumps
 from jot.plugins.execution.workspace import Git, Workspace, WorkspaceError
 from jot.plugins.harness import FakePlugin, HarnessPlugin
@@ -1042,3 +1045,152 @@ class TestActions:
         assert source is not None
         assert "register('jot.panels'" in source
         assert "register('jot.badges'" in source
+
+
+class TestDrawdown:
+    """Unattended drawdown, one jot at a time, and the owner's inbox."""
+
+    @staticmethod
+    def drawdown(host: PluginHost, **extra: JsonValue) -> None:
+        """Turn drawdown on with extra settings."""
+        settings = host.settings("execution")
+        assert isinstance(settings, ExecutionSettings)
+        values = settings.model_dump(mode="json") | {"drawdown": True, **extra}
+        host.configure("execution", values, USER)
+
+    @staticmethod
+    def drain(host: PluginHost, clock: FakeClock) -> None:
+        """Tick until no job is left."""
+        for _ in range(30):
+            if not host.tick().jobs and not host.jobs(statuses=[JobStatus.QUEUED]):
+                return
+            clock.advance(1)
+        pytest.fail("jobs did not drain")
+
+    def test_three_ready_jots_run_one_at_a_time_in_rank_order(
+        self,
+        host: PluginHost,
+        commands: Commands,
+        session: Session,
+        clock: FakeClock,
+    ) -> None:
+        """Each run starts only after the previous one ended, top rank first."""
+        self.drawdown(host, direct_projects=["web"])
+        reply(host, DONE)
+        ids = [
+            commands.create(title=t, profile="task", project="web").id
+            for t in ("one", "two", "three")
+        ]
+        commands.move_rank(ids[2], Placement.TOP)
+        self.drain(host, clock)
+        jobs = sorted(host.jobs(plugin_id="execution"), key=lambda job: job.id)
+        runs = [job for job in jobs if job.kind != "drawdown"]
+        assert [job.jot_id for job in runs] == [ids[2], ids[0], ids[1]]
+        for earlier, later in itertools.pairwise(runs):
+            between = [j for j in jobs if earlier.id < j.id < later.id]
+            assert [j.kind for j in between] == ["drawdown"]
+        assert jobs[-1].result == {"skipped": "nothing ready"}
+        for jot_id in ids:
+            assert Claims(session).state(jot_id).phase == Phase.REVIEW
+        waiting = Inbox(session).waiting()
+        assert [w.jot_id for w in waiting] == [ids[2], ids[0], ids[1]]
+        assert {w.reason for w in waiting} == {"review a result"}
+
+    def test_planned_drawdown_waits_for_approval(
+        self,
+        host: PluginHost,
+        commands: Commands,
+        control: Control,
+        session: Session,
+        clock: FakeClock,
+    ) -> None:
+        """Plans pile up for approval; approving runs the execution."""
+        self.drawdown(host)
+        reply(host, PLAN)
+        first = commands.create(title="one", profile="task", project="web").id
+        second = commands.create(title="two", profile="task", project="web").id
+        self.drain(host, clock)
+        assert [w.reason for w in Inbox(session).waiting()] == ["approve a plan"] * 2
+        reply(host, DONE)
+        control.approve(second)
+        self.drain(host, clock)
+        assert Claims(session).state(second).phase == Phase.REVIEW
+        assert Claims(session).state(first).phase == Phase.AWAITING_APPROVAL
+
+    def test_filters_busy_repos_and_caps(
+        self,
+        host: PluginHost,
+        commands: Commands,
+        session: Session,
+        tmp_path: Path,
+    ) -> None:
+        """Projects filter, one run per repository, and the daily cap pauses it."""
+        other_repo = make_repo(tmp_path / "repos" / "other")
+        commands.create_project("api", "API")
+        commands.create_project("docs", "Docs")
+        settings = host.settings("execution")
+        assert isinstance(settings, ExecutionSettings)
+        repos: Metadata = {**settings.repos, "api": str(other_repo)}
+        self.drawdown(
+            host, repos=repos, concurrency=3, drawdown_projects=["web", "api"]
+        )
+        web = [
+            commands.create(title=f"w{i}", profile="task", project="web").id
+            for i in range(2)
+        ]
+        api_jot = commands.create(title="a", profile="task", project="api").id
+        commands.create(title="d", profile="task", project="docs")
+        context = host.context_for("execution")
+        drawdown = Drawdown(context, ExecutionPlugin.options(context))
+        assert drawdown.run() == {"started": web[0], "kind": "plan"}
+        assert drawdown.run() == {"started": api_jot, "kind": "plan"}
+        assert drawdown.run() == {"skipped": "nothing ready"}
+        context.state.set(SPEND_KEY + today(), 99.0)
+        assert "Daily spend cap" in str(drawdown.run())
+        self.drawdown(host, concurrency=1)
+        context = host.context_for("execution")
+        assert Drawdown(context, ExecutionPlugin.options(context)).run() == {
+            "skipped": "busy"
+        }
+        del session
+
+    def test_off(self, host: PluginHost, commands: Commands) -> None:
+        """With drawdown off nothing is queued, and a stray pass does nothing."""
+        commands.create(title="x", profile="task", project="web")
+        host.tick()
+        assert host.jobs(plugin_id="execution") == []
+        context = host.context_for("execution")
+        assert Drawdown(context, ExecutionPlugin.options(context)).run() == {
+            "skipped": "drawdown is off"
+        }
+
+    def test_inbox_failures_and_action(
+        self, host: PluginHost, control: Control, task: int, session: Session
+    ) -> None:
+        """Failed runs show in the inbox; the action lists it too."""
+        host.configure("harness-fake", {"fail": True}, USER)
+        control.start(task, now=True)
+        waiting = Inbox(session).waiting()
+        assert waiting[0].reason == "run failed: retry or edit"
+        listed = host.action("execution", "inbox", {}, USER)
+        assert isinstance(listed, list)
+        assert len(listed) == 1
+        assert Inbox(session).waiting(limit=0) == []
+
+
+@pytest.mark.usefixtures("home")
+class TestDrawdownCommands:
+    """``jot work drawdown`` and ``jot work inbox``."""
+
+    def test_cli(self) -> None:
+        """Toggle drawdown and read the inbox."""
+        jot("plugin", "enable", "execution")
+        assert jot("work", "drawdown") == "Drawdown is off\n"
+        assert jot("work", "drawdown", "on") == "Drawdown is on\n"
+        assert jot("work", "drawdown", "off") == "Drawdown is off\n"
+        jot("work", "drawdown", "maybe", code=2)
+        assert jot("work", "inbox") == "Nothing waiting on you\n"
+        jot("add", "-p", "task", "Ship it")
+        jot("work", "claim", "1", "-a", "bot")
+        jot("work", "release", "1", "-a", "bot", "--phase", "review")
+        assert "review a result" in jot("work", "inbox")

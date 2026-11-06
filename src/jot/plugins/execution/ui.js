@@ -103,4 +103,20 @@ export default function setup(jot) {
   }
 
   register('jot.panels', props => html`<${Panel} ...${props} key=${props.detail.jot.id}/>`);
+
+  class NeedsYou extends Component {
+    constructor() { super(); this.state = { items: null, error: '' }; }
+    async componentDidMount() {
+      try { this.setState({ items: await call('inbox', {}) }); } catch (error) { this.setState({ items: [], error: error.message }); }
+    }
+    render(_, { items, error }) {
+      if (items === null) return html`<p class="muted">Loading…</p>`;
+      if (error) return html`<p class="error">${error}</p>`;
+      if (!items.length) return html`<p class="muted">Nothing waiting on you.</p>`;
+      return html`<ul class="needs-you" aria-label="Needs you">${items.map(w => html`<li key=${w.jot_id}>
+        <a href=${`#/jot/${w.jot_id}/needs-you`}>#${w.jot_id} ${w.title}</a> <span class="pill phase">${w.reason}</span>
+        ${w.project && html` <span class="pill project">@${w.project}</span>`}</li>`)}</ul>`;
+    }
+  }
+  register('views', { id: 'needs-you', label: 'Needs you', render: () => html`<${NeedsYou}/>` });
 }
