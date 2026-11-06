@@ -1,359 +1,109 @@
 """Execution: supervised agent work on jots.
 
-Slice 8a (this module) gives external agents safe claims: a lease recorded in
-``metadata.execution`` and written in one serialized transaction with a
-version check, so two agents can never hold the same jot. The phase an agent
-releases a jot into is mirrored to labels (``needs-input``,
-``awaiting-approval``, ``approved``, ``review``) and to the profile's status
-category, so lists and boards work without the plugin.
+External agents use claims (``jot work claim/heartbeat/release``): a lease in
+``metadata.execution`` so two agents never hold the same jot. The built-in
+runner (``jot work run``) plans read-only through the ``harness@1`` service,
+waits for answers and approval, executes in a per-jot git worktree, and hands
+the jot back for review. Phases are mirrored to labels and status categories
+so lists and boards work without the plugin.
 """
 
 from __future__ import annotations
 
 import os
-from datetime import datetime, timedelta
-from enum import StrEnum
+from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, override
 
 import typer
-from pydantic import Field
+from pydantic import JsonValue
 
-from jot.app.commands import JotPatch
-from jot.app.queries import JotFilter
-from jot.core.models import Clock, Origin, Record, StatusCategory, WriteContext
-from jot.exceptions import ConflictError, InvalidInputError
-from jot.plugins.api import Plugin
-from jot.plugins.harness.api import obj, text_of
+from jot.core.models import Origin, WriteContext
+from jot.exceptions import AppError, ConflictError, InvalidInputError
+from jot.plugins.api import JobStatus, Plugin
+from jot.plugins.execution.claims import (
+    CATEGORY,
+    DEFAULT_LEASE,
+    LABELS,
+    PLUGIN,
+    RELEASE_TO,
+    RUNNING,
+    WAITING,
+    Claim,
+    Claims,
+    Phase,
+    WorkState,
+)
+from jot.plugins.execution.runner import (
+    AGENT,
+    ExecutionSettings,
+    RunLog,
+    Runner,
+    dumps,
+)
+from jot.plugins.execution.workspace import Workspace
+from jot.plugins.harness import SERVICE
+from jot.plugins.harness.api import HarnessEvent, integer, obj, text_of
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
     from jot.app.commands import Commands
-    from jot.app.session import Session
-    from jot.core.models import Jot, Metadata
-    from jot.plugins.api import PluginCli
+    from jot.plugins.api import Job, PluginCli
+    from jot.plugins.context import PluginContext
     from jot.plugins.host import PluginHost
 
-PLUGIN = "execution"
-DEFAULT_LEASE = 1800
-
-
-class Phase(StrEnum):
-    """Where a jot is in supervised work."""
-
-    IDLE = "idle"
-    PLANNING = "planning"
-    NEEDS_INPUT = "needs_input"
-    AWAITING_APPROVAL = "awaiting_approval"
-    APPROVED = "approved"
-    EXECUTING = "executing"
-    REVIEW = "review"
-    DONE = "done"
-
-
-LABELS: dict[Phase, str] = {
-    Phase.NEEDS_INPUT: "needs-input",
-    Phase.AWAITING_APPROVAL: "awaiting-approval",
-    Phase.APPROVED: "approved",
-    Phase.REVIEW: "review",
-}
-CATEGORY: dict[Phase, StatusCategory] = {
-    Phase.IDLE: StatusCategory.OPEN,
-    Phase.DONE: StatusCategory.DONE,
-}
-RUNNING = frozenset({Phase.PLANNING, Phase.EXECUTING})
-WAITING = frozenset({Phase.NEEDS_INPUT, Phase.AWAITING_APPROVAL, Phase.REVIEW})
-RELEASE_TO = frozenset(
-    {Phase.IDLE, Phase.NEEDS_INPUT, Phase.AWAITING_APPROVAL, Phase.REVIEW, Phase.DONE}
-)
-
-
-class Claim(Record):
-    """Who holds a jot, until when, and how many times it changed hands."""
-
-    agent: str = Field(min_length=1)
-    lease_until: datetime
-    generation: int = Field(default=1, ge=1)
-
-
-class WorkState(Record):
-    """A jot's execution state, as stored in ``metadata.execution``."""
-
-    jot_id: int
-    title: str
-    phase: Phase
-    claim: Claim | None = None
-    version: int
-
-    @property
-    def held(self) -> bool:
-        """Whether a claim exists (live or not)."""
-        return self.claim is not None
-
-
-class ExecutionSettings(Record):
-    """Execution settings (slice 8a: claims only)."""
-
-    lease_seconds: int = Field(default=DEFAULT_LEASE, ge=30, le=86_400)
-
-
-class Claims:
-    """Claim, heartbeat, release, and approve jots for agents."""
-
-    def __init__(
-        self,
-        session: Session,
-        *,
-        now: Callable[[], datetime] = Clock.now,
-        correlation_id: str | None = None,
-    ) -> None:
-        self.session = session
-        self.now = now
-        self.correlation_id = correlation_id
-
-    # Reading ------------------------------------------------------------------
-
-    @staticmethod
-    def phase_of(jot: Jot) -> Phase:
-        """The stored phase, else one inferred from labels and status."""
-        stored = text_of(obj(jot.metadata.get(PLUGIN)).get("phase"))
-        if stored in Phase:
-            return Phase(stored)
-        for phase, label in LABELS.items():
-            if label in jot.labels:
-                return phase
-        if jot.category == StatusCategory.DONE:
-            return Phase.DONE
-        return Phase.IDLE
-
-    @staticmethod
-    def words(phase: Phase) -> str:
-        """A phase as words."""
-        return phase.value.replace("_", " ")
-
-    @staticmethod
-    def claim_of(jot: Jot) -> Claim | None:
-        """The stored claim, if any."""
-        raw = obj(jot.metadata.get(PLUGIN)).get("claim")
-        return Claim.model_validate(raw) if isinstance(raw, dict) else None
-
-    def state(self, jot_id: int) -> WorkState:
-        """A jot's phase and claim."""
-        return self._state(self.session.queries.get(jot_id))
-
-    def _state(self, jot: Jot) -> WorkState:
-        """Build the state record for a jot."""
-        return WorkState(
-            jot_id=jot.id,
-            title=jot.title,
-            phase=self.phase_of(jot),
-            claim=self.claim_of(jot),
-            version=jot.version,
-        )
-
-    def live(self, claim: Claim | None) -> bool:
-        """Whether a claim's lease has not expired."""
-        return claim is not None and claim.lease_until > self.now()
-
-    def blocked(self, jot_id: int) -> bool:
-        """Whether an open jot blocks this one."""
-        queries = self.session.queries
-        for link in queries.links(jot_id):
-            if link.rel == "blocks" and link.dst == jot_id:
-                blocker = queries.get(link.src, include_deleted=True)
-                if blocker.deleted_at is None and blocker.category in {
-                    StatusCategory.OPEN,
-                    StatusCategory.ACTIVE,
-                }:
-                    return True
-        return False
-
-    def ready(self, jot: Jot) -> bool:
-        """Whether an agent may pick this jot up now (stale running claims count)."""
-        phase = self.phase_of(jot)
-        return (
-            phase in {Phase.IDLE, Phase.APPROVED, *RUNNING}
-            and jot.category in {StatusCategory.OPEN, StatusCategory.ACTIVE}
-            and self.allowed(jot)
-            and not self.live(self.claim_of(jot))
-            and not self.blocked(jot.id)
-        )
-
-    def allowed(self, jot: Jot) -> bool:
-        """Whether the jot's profile lets the execution plugin act."""
-        plugins = self.session.profiles.get(jot.profile).plugins
-        return not plugins or PLUGIN in plugins
-
-    def next(self, limit: int = 5, project: str | None = None) -> list[WorkState]:
-        """Ready jots in rank order."""
-        criteria = JotFilter(
-            categories=[StatusCategory.OPEN, StatusCategory.ACTIVE], project=project
-        )
-        ready = [
-            self._state(j) for j in self.session.queries.jots(criteria) if self.ready(j)
-        ]
-        return ready[:limit]
-
-    # Writing ------------------------------------------------------------------
-
-    def claim(
-        self,
-        jot_id: int,
-        agent: str,
-        *,
-        lease: int = DEFAULT_LEASE,
-        direct: bool = False,
-    ) -> WorkState:
-        """Take a jot (or renew your own claim) and move it into a running phase."""
-        with self.session.db.write():
-            jot = self.session.queries.get(jot_id)
-            current = self.claim_of(jot)
-            if not self.allowed(jot):
-                raise InvalidInputError(
-                    f"Jot {jot_id}'s profile {jot.profile} excludes execution"
-                )
-            if current is not None and current.agent == agent and self.live(current):
-                return self._write(jot, agent, self.phase_of(jot), current, lease)
-            if self.live(current):
-                assert current is not None  # noqa: S101 - live() checked it
-                raise ConflictError(
-                    f"Jot {jot_id} is claimed by {current.agent} until "
-                    f"{current.lease_until.isoformat()}"
-                )
-            phase = self.phase_of(jot)
-            if (
-                phase in WAITING
-                or phase == Phase.DONE
-                or jot.category
-                not in {
-                    StatusCategory.OPEN,
-                    StatusCategory.ACTIVE,
-                }
-            ):
-                raise InvalidInputError(
-                    f"Jot {jot_id} is {self.words(phase)}, not ready to claim"
-                )
-            if self.blocked(jot_id):
-                raise InvalidInputError(f"Jot {jot_id} is blocked by an open jot")
-            target = (
-                Phase.EXECUTING if direct or phase == Phase.APPROVED else Phase.PLANNING
-            )
-            return self._write(jot, agent, target, current, lease, take=True)
-
-    def heartbeat(
-        self, jot_id: int, agent: str, *, lease: int = DEFAULT_LEASE
-    ) -> WorkState:
-        """Extend your lease."""
-        with self.session.db.write():
-            jot = self.session.queries.get(jot_id)
-            current = self._held_by(jot, agent)
-            return self._write(jot, agent, self.phase_of(jot), current, lease)
-
-    def release(
-        self, jot_id: int, agent: str, phase: Phase, *, note: str | None = None
-    ) -> WorkState:
-        """Give the jot back in an owner-facing or finished phase."""
-        if phase not in RELEASE_TO:
-            choices = ", ".join(sorted(p.value for p in RELEASE_TO))
-            raise InvalidInputError(f"Release to one of: {choices}")
-        with self.session.db.write():
-            jot = self.session.queries.get(jot_id)
-            self._held_by(jot, agent)
-            state = self._move(jot, phase, None, actor=agent)
-            if note:
-                self._commands(agent, "release").comment(
-                    jot_id, note, kind="execution.note"
-                )
-            return state
-
-    def approve(self, jot_id: int, actor: str) -> WorkState:
-        """Approve a plan: an agent may now claim the jot for execution."""
-        with self.session.db.write():
-            jot = self.session.queries.get(jot_id)
-            phase = self.phase_of(jot)
-            if phase != Phase.AWAITING_APPROVAL:
-                raise InvalidInputError(
-                    f"Jot {jot_id} is {self.words(phase)}, not awaiting approval"
-                )
-            state = self._move(jot, Phase.APPROVED, None, actor=actor)
-            self._commands(actor, "approve").comment(
-                jot_id, "Approved.", kind="execution.approval"
-            )
-            return state
-
-    def _held_by(self, jot: Jot, agent: str) -> Claim:
-        """Return the agent's live claim, or refuse."""
-        current = self.claim_of(jot)
-        if current is None or current.agent != agent:
-            holder = current.agent if current else "nobody"
-            raise ConflictError(f"Jot {jot.id} is held by {holder}, not {agent}")
-        if not self.live(current):
-            raise ConflictError(f"{agent}'s lease on jot {jot.id} expired; claim again")
-        return current
-
-    def _write(  # noqa: PLR0913 - one keyword per claim attribute
-        self,
-        jot: Jot,
-        agent: str,
-        phase: Phase,
-        current: Claim | None,
-        lease: int,
-        *,
-        take: bool = False,
-    ) -> WorkState:
-        """Store a claim (new generation when taken over) and the phase."""
-        generation = (current.generation if current else 0) + (1 if take else 0)
-        claim = Claim(
-            agent=agent,
-            lease_until=self.now() + timedelta(seconds=lease),
-            generation=max(generation, 1),
-        )
-        return self._move(jot, phase, claim, actor=agent)
-
-    def _move(
-        self, jot: Jot, phase: Phase, claim: Claim | None, *, actor: str
-    ) -> WorkState:
-        """Write phase, claim, labels, and status in the open transaction."""
-        commands = self._commands(actor, f"execution: {phase.value}")
-        record: Metadata = {"phase": phase.value, "claim": None}
-        if claim is not None:
-            record["claim"] = claim.model_dump(mode="json")
-        updated = commands.update(
-            jot.id, JotPatch(metadata={PLUGIN: record}), expected_version=jot.version
-        )
-        wanted = LABELS.get(phase)
-        stale = [label for label in LABELS.values() if label != wanted]
-        updated = commands.label(jot.id, add=[wanted] if wanted else [], remove=stale)
-        status = self._status_for(updated, CATEGORY.get(phase, StatusCategory.ACTIVE))
-        if status is not None and status != updated.status:
-            updated = commands.set_status(jot.id, status)
-        return self._state(updated)
-
-    def _status_for(self, jot: Jot, category: StatusCategory) -> str | None:
-        """The jot's status if it already fits, else the profile's first match."""
-        if jot.category == category:
-            return jot.status
-        profile = self.session.profiles.get(jot.profile)
-        return next((s.id for s in profile.statuses if s.category == category), None)
-
-    def _commands(self, actor: str, reason: str) -> Commands:
-        """Commands attributed to the acting agent or owner."""
-        extra = {"correlation_id": self.correlation_id} if self.correlation_id else {}
-        return self.session.commands(
-            WriteContext(actor=actor, origin=Origin.CLI, reason=reason, **extra)
-        )
+__all__ = [
+    "AGENT",
+    "CATEGORY",
+    "DEFAULT_LEASE",
+    "LABELS",
+    "PLUGIN",
+    "RELEASE_TO",
+    "RUNNING",
+    "WAITING",
+    "Claim",
+    "Claims",
+    "Control",
+    "ExecutionPlugin",
+    "ExecutionSettings",
+    "Phase",
+    "WorkState",
+]
+PLAN = "plan"
+EXECUTE = "execute"
+LIVE = [JobStatus.QUEUED, JobStatus.RUNNING]
 
 
 class ExecutionPlugin(Plugin):
-    """Claims and phases for agent work (the runner arrives in slice 8b)."""
+    """Claims for agents, and a runner that plans and executes jots."""
 
     id = PLUGIN
     name = "Execution"
-    version = "1"
-    description = "Claims with leases so agents can work jots safely."
+    version = "2"
+    description = "Supervised agent work: claims, plans, approval, worktrees."
     listens = False
     command = "work"
     settings_model = ExecutionSettings
+
+    @staticmethod
+    def options(context: PluginContext) -> ExecutionSettings:
+        """Typed settings."""
+        settings = context.settings
+        if not isinstance(settings, ExecutionSettings):  # pragma: no cover - host bug
+            raise TypeError("execution settings have the wrong type")
+        return settings
+
+    @override
+    def run(self, job: Job, context: PluginContext) -> JsonValue:
+        """Run one plan or execute job."""
+        if job.jot_id is None or job.kind not in {PLAN, EXECUTE}:
+            return {"skipped": f"unknown job {job.kind}"}
+        runner = Runner(context, self.options(context))
+        return Control.attempt(
+            runner,
+            job.jot_id,
+            job.kind,
+            direct=job.payload.get("direct") is True,
+            last=job.attempts >= job.max_attempts,
+        )
 
     @classmethod
     @override
@@ -362,13 +112,266 @@ class ExecutionPlugin(Plugin):
         return WorkCommands(cli).app()
 
 
+class Control:
+    """Owner and runner actions shared by the CLI and (later) the HTTP API."""
+
+    def __init__(self, host: PluginHost, actor: str) -> None:
+        if not host.status(PLUGIN).enabled:
+            raise InvalidInputError(
+                "Execution is off; run `jot plugin enable execution`"
+            )
+        self.host = host
+        self.actor = actor
+        self.claims = Claims(host.session)
+
+    @property
+    def settings(self) -> ExecutionSettings:
+        """Current settings."""
+        settings = self.host.settings(PLUGIN)
+        if not isinstance(settings, ExecutionSettings):  # pragma: no cover - host bug
+            raise TypeError("execution settings have the wrong type")
+        return settings
+
+    def commands(self, reason: str) -> Commands:
+        """Commands attributed to the owner."""
+        return self.host.session.commands(
+            WriteContext(actor=self.actor, origin=Origin.CLI, reason=reason)
+        )
+
+    @staticmethod
+    def attempt(
+        runner: Runner, jot_id: int, kind: str, *, direct: bool, last: bool
+    ) -> JsonValue:
+        """Run a phase; retry on harness or git errors, give up on the last try."""
+        phase = Phase.PLANNING if kind == PLAN else Phase.EXECUTING
+        try:
+            state = (
+                runner.plan(jot_id)
+                if kind == PLAN
+                else runner.execute(jot_id, direct=direct)
+            )
+        except ConflictError as err:
+            return {"stopped": str(err)}  # lease lost or cancelled: write nothing
+        except InvalidInputError as err:
+            runner.give_up(jot_id, phase, str(err))
+            return {"failed": str(err)}
+        except AppError as err:
+            if not last:
+                raise
+            runner.give_up(jot_id, phase, str(err))
+            return {"failed": str(err)}
+        return {"phase": state.phase.value, "version": state.version}
+
+    def queue(
+        self, jot_id: int, kind: str, *, direct: bool = False, now: bool
+    ) -> WorkState:
+        """Queue a plan or execute job, or (``now``) run it here."""
+        context = self.host.context_for(PLUGIN)
+        if now:
+            runner = Runner(context, self.settings, name="cli")
+            Control.attempt(runner, jot_id, kind, direct=direct, last=True)
+        else:
+            context.enqueue(
+                kind, {"direct": direct}, jot_id=jot_id, dedupe_key=f"jot-{jot_id}"
+            )
+        return self.claims.state(jot_id)
+
+    def check_runnable(self, jot_id: int) -> None:
+        """Refuse when the harness or a repository is missing."""
+        if not self.host.services(SERVICE):
+            raise InvalidInputError(
+                "The runner needs harness@1; run `jot plugin enable harness` "
+                "and a backend such as `jot plugin enable harness-claude`"
+            )
+        jot = self.host.session.queries.get(jot_id)
+        Runner(self.host.context_for(PLUGIN), self.settings).repo_for(jot)
+
+    def start(
+        self, jot_id: int, *, direct: bool = False, now: bool = False
+    ) -> WorkState:
+        """Plan (or with ``direct``, execute) a ready jot."""
+        self.check_runnable(jot_id)
+        jot = self.host.session.queries.get(jot_id)
+        if not self.claims.ready(jot):
+            state = self.claims.state(jot_id)
+            held = f" and held by {state.claim.agent}" if state.claim else ""
+            raise InvalidInputError(
+                f"Jot {jot_id} is {Claims.words(state.phase)}{held}; not ready to run"
+            )
+        phase = Claims.phase_of(jot)
+        executing = direct or phase in {Phase.APPROVED, Phase.EXECUTING}
+        return self.queue(
+            jot_id, EXECUTE if executing else PLAN, direct=direct, now=now
+        )
+
+    def approve(
+        self, jot_id: int, *, run: bool | None = None, now: bool = False
+    ) -> WorkState:
+        """Approve the plan; queue execution when the runner made it."""
+        jot = self.host.session.queries.get(jot_id)
+        record = Claims.record_of(jot)
+        revision = text_of(obj(record.get("plan")).get("revision"))
+        text = f"Approved plan {revision}." if revision else "Approved."
+        state = self.claims.approve(jot_id, self.actor, text)
+        if run if run is not None else record.get("runner") is True:
+            self.check_runnable(jot_id)
+            return self.queue(jot_id, EXECUTE, now=now)
+        return state
+
+    def answer(
+        self, jot_id: int, question: int, text: str, *, now: bool = False
+    ) -> WorkState:
+        """Answer one question; resume once every open question has an answer."""
+        comments = self.host.session.queries.comments(jot_id)
+        asked = next((c for c in comments if c.id == question), None)
+        if asked is None or asked.kind != "execution.question":
+            raise InvalidInputError(
+                f"Comment {question} is not a question on jot {jot_id}"
+            )
+        self.commands("answer").comment(
+            jot_id, text, kind="execution.answer", reply_to=question
+        )
+        jot = self.host.session.queries.get(jot_id)
+        if Claims.phase_of(jot) != Phase.NEEDS_INPUT:
+            return self.claims.state(jot_id)
+        open_ids = record_ids(Claims.record_of(jot).get("questions"))
+        answered = {c.reply_to for c in comments} | {question}
+        if any(qid not in answered for qid in open_ids):
+            return self.claims.state(jot_id)
+        return self.resume(jot_id, now=now)
+
+    def resume(self, jot_id: int, *, now: bool = False) -> WorkState:
+        """Put a jot waiting for input back into the phase that asked."""
+        record = Claims.record_of(self.host.session.queries.get(jot_id))
+        executing = text_of(record.get("asked_in")) == Phase.EXECUTING.value
+        target = Phase.APPROVED if executing else Phase.IDLE
+        if record.get("runner") is not True:
+            return self.claims.reopen(jot_id, self.actor, target)
+        self.check_runnable(jot_id)
+        self.claims.reopen(jot_id, self.actor, target)
+        return self.queue(jot_id, EXECUTE if executing else PLAN, now=now)
+
+    def send_back(self, jot_id: int, note: str, *, now: bool = False) -> WorkState:
+        """Re-plan (from awaiting approval) or rework (from review) with a note."""
+        phase = self.claims.state(jot_id).phase
+        if phase not in {Phase.AWAITING_APPROVAL, Phase.REVIEW}:
+            raise InvalidInputError(
+                f"Jot {jot_id} is {Claims.words(phase)}; send back a plan or a result"
+            )
+        self.check_runnable(jot_id)
+        self.commands("send back").comment(jot_id, note, kind="execution.feedback")
+        if phase == Phase.AWAITING_APPROVAL:
+            self.claims.reopen(jot_id, self.actor, Phase.IDLE)
+            return self.queue(jot_id, PLAN, now=now)
+        self.claims.reopen(jot_id, self.actor, Phase.APPROVED)
+        return self.queue(jot_id, EXECUTE, now=now)
+
+    def retry(self, jot_id: int, *, now: bool = False) -> WorkState:
+        """Run again after a failure (or start a ready jot)."""
+        if self.claims.state(jot_id).phase == Phase.NEEDS_INPUT:
+            return self.resume(jot_id, now=now)
+        return self.start(jot_id, now=now)
+
+    def cancel(self, jot_id: int) -> WorkState:
+        """Cancel queued and running jobs and put the jot back before its run."""
+        jobs = [
+            job
+            for job in self.host.jobs(plugin_id=PLUGIN, statuses=LIVE)
+            if job.jot_id == jot_id
+        ]
+        state = self.claims.state(jot_id)
+        if not jobs and state.phase not in RUNNING:
+            raise InvalidInputError(f"Jot {jot_id} has no run to cancel")
+        for job in jobs:
+            self.host.cancel(job.id)
+        if state.phase in RUNNING:
+            target = Phase.APPROVED if state.phase == Phase.EXECUTING else Phase.IDLE
+            return self.claims.reset(jot_id, self.actor, target)
+        return state
+
+    def log(self, jot_id: int) -> list[HarnessEvent]:
+        """The latest run's events."""
+        jot = self.host.session.queries.get(jot_id)
+        path = text_of(Claims.record_of(jot).get("log"))
+        if not path:
+            raise InvalidInputError(f"Jot {jot_id} has no run log")
+        return RunLog(Path(path)).read()
+
+    def clean(self, jot_id: int, *, force: bool = False) -> Workspace:
+        """Remove a jot's worktree (the branch stays)."""
+        jot = self.host.session.queries.get(jot_id)
+        if Claims.phase_of(jot) in RUNNING and self.claims.live(Claims.claim_of(jot)):
+            raise InvalidInputError(f"Jot {jot_id} is running; cancel it first")
+        workspace = Runner(self.host.context_for(PLUGIN), self.settings).workspace(jot)
+        workspace.remove(force=force)
+        return workspace
+
+    def repos(
+        self,
+        updates: dict[str, str | None],
+        *,
+        default: str | None = None,
+        from_import: bool = False,
+    ) -> ExecutionSettings:
+        """Change the project -> repository mapping."""
+        settings = self.settings
+        repos = dict(settings.repos)
+        if from_import:
+            found = imported_repos(self.host)
+            repos |= {k: v for k, v in found.items() if k not in repos}
+        projects = self.host.session.queries.projects(include_archived=True)
+        known = {p.slug for p in projects}
+        for slug, path in updates.items():
+            if path is None:
+                repos.pop(slug, None)
+                continue
+            if slug not in known:
+                raise InvalidInputError(f"No project {slug}")
+            repos[slug] = str(Workspace.check_repo(Path(path).expanduser()))
+        values = settings.model_dump(mode="json") | {"repos": repos}
+        if default is not None:
+            values["default_repo"] = (
+                str(Workspace.check_repo(Path(default).expanduser())) if default else ""
+            )
+        self.host.configure(
+            PLUGIN, values, WriteContext(actor=self.actor, origin=Origin.CLI)
+        )
+        return self.settings
+
+
+def record_ids(value: JsonValue) -> list[int]:
+    """Integer ids from a JSON list."""
+    if not isinstance(value, list):
+        return []
+    return [i for i in (integer(v) for v in value) if i is not None]
+
+
+def imported_repos(host: PluginHost) -> dict[str, str]:
+    """Project -> repo path from v0.1 import events."""
+    found: dict[str, str] = {}
+    after = 0
+    while events := host.session.queries.events(after, 500):
+        for event in events:
+            if event.kind != "project.imported":
+                continue
+            project = obj(event.data.get("project"))
+            slug, path = text_of(project.get("slug")), text_of(project.get("repo_path"))
+            if slug and path:
+                found[slug] = path
+        after = events[-1].id
+    return found
+
+
 Json = Annotated[bool, typer.Option("--json", help="Emit JSON")]
 Agent = Annotated[str, typer.Option("--agent", "-a", help="Your stable agent name")]
 JotId = Annotated[int, typer.Argument(help="Jot id")]
+Now = Annotated[
+    bool, typer.Option("--now", help="Run here and wait instead of queueing")
+]
 
 
 class WorkCommands:
-    """``jot work``: the queue for agents."""
+    """``jot work``: the agent queue and the runner."""
 
     def __init__(self, cli: PluginCli) -> None:
         self.cli = cli
@@ -376,17 +379,34 @@ class WorkCommands:
     def app(self) -> typer.Typer:
         """Build the command group."""
         app = typer.Typer(
-            no_args_is_help=True, help="Claim and hand back jots (agents)"
+            no_args_is_help=True, help="Agent work on jots: claims and the runner"
         )
-        app.command("next")(self.next)
-        app.command("claim")(self.claim)
-        app.command("heartbeat")(self.heartbeat)
-        app.command("release")(self.release)
-        app.command("approve")(self.approve)
-        app.command("state")(self.state)
+        for name, command in (
+            ("next", self.next),
+            ("claim", self.claim),
+            ("heartbeat", self.heartbeat),
+            ("release", self.release),
+            ("state", self.state),
+            ("run", self.run),
+            ("approve", self.approve),
+            ("answer", self.answer),
+            ("send-back", self.send_back),
+            ("retry", self.retry),
+            ("cancel", self.cancel),
+            ("log", self.log),
+            ("repos", self.repos),
+            ("clean", self.clean),
+        ):
+            app.command(name)(command)
         return app
 
-    def claims(self, host: PluginHost) -> tuple[Claims, int]:
+    @staticmethod
+    def actor() -> str:
+        """The owner's actor name."""
+        return os.environ.get("JOT_ACTOR") or "user"
+
+    @staticmethod
+    def claims(host: PluginHost) -> tuple[Claims, int]:
         """A claims service, refusing when the plugin is off; plus the lease."""
         if not host.status(PLUGIN).enabled:
             raise InvalidInputError(
@@ -409,6 +429,10 @@ class WorkCommands:
             until = f"{state.claim.lease_until:%Y-%m-%d %H:%M}"
             holder = f"  [{state.claim.agent} until {until}Z]"
         return f"{state.jot_id:>5}  {state.phase.value:<17} {state.title}{holder}\n"
+
+    def emit(self, state: WorkState) -> None:
+        """Print one state."""
+        self.cli.emit(state, self.line(state))
 
     def next(
         self,
@@ -438,7 +462,7 @@ class WorkCommands:
         with self.cli.host(json=json) as host:
             claims, default = self.claims(host)
             state = claims.claim(jot_id, agent, lease=lease or default, direct=direct)
-        self.cli.emit(state, self.line(state))
+        self.emit(state)
 
     def heartbeat(
         self,
@@ -452,7 +476,7 @@ class WorkCommands:
         with self.cli.host(json=json) as host:
             claims, default = self.claims(host)
             state = claims.heartbeat(jot_id, agent, lease=lease or default)
-        self.cli.emit(state, self.line(state))
+        self.emit(state)
 
     def release(
         self,
@@ -473,23 +497,148 @@ class WorkCommands:
         """Hand the jot back in a phase for the owner (or finished)."""
         with self.cli.host(json=json) as host:
             state = self.claims(host)[0].release(jot_id, agent, phase, note=note)
-        self.cli.emit(state, self.line(state))
-
-    def approve(
-        self,
-        jot_id: JotId,
-        *,
-        actor: Annotated[str | None, typer.Option("--actor")] = None,
-        json: Json = False,
-    ) -> None:
-        """Approve a plan so an agent may execute it."""
-        who = actor or os.environ.get("JOT_ACTOR") or "user"
-        with self.cli.host(json=json) as host:
-            state = self.claims(host)[0].approve(jot_id, who)
-        self.cli.emit(state, self.line(state))
+        self.emit(state)
 
     def state(self, jot_id: JotId, *, json: Json = False) -> None:
         """Show a jot's phase and claim."""
         with self.cli.host(json=json) as host:
             state = self.claims(host)[0].state(jot_id)
-        self.cli.emit(state, self.line(state))
+        self.emit(state)
+
+    def run(
+        self,
+        jot_id: JotId,
+        *,
+        direct: Annotated[
+            bool, typer.Option("--direct", help="Skip planning and approval")
+        ] = False,
+        now: Now = False,
+        json: Json = False,
+    ) -> None:
+        """Have the runner plan (or execute) a jot through the harness."""
+        with self.cli.host(json=json) as host:
+            state = Control(host, self.actor()).start(jot_id, direct=direct, now=now)
+        self.emit(state)
+
+    def approve(
+        self,
+        jot_id: JotId,
+        *,
+        run: Annotated[
+            bool | None,
+            typer.Option(
+                "--run/--no-run",
+                help="Queue execution (default: when the runner made the plan)",
+            ),
+        ] = None,
+        actor: Annotated[str | None, typer.Option("--actor")] = None,
+        now: Now = False,
+        json: Json = False,
+    ) -> None:
+        """Approve a plan so it may be executed."""
+        with self.cli.host(json=json) as host:
+            control = Control(host, actor or self.actor())
+            state = control.approve(jot_id, run=run, now=now)
+        self.emit(state)
+
+    def answer(
+        self,
+        jot_id: JotId,
+        question: Annotated[int, typer.Argument(help="The question's comment id")],
+        text: Annotated[str, typer.Argument(help="Your answer")],
+        *,
+        now: Now = False,
+        json: Json = False,
+    ) -> None:
+        """Answer an agent's question; the run resumes when all are answered."""
+        with self.cli.host(json=json) as host:
+            state = Control(host, self.actor()).answer(jot_id, question, text, now=now)
+        self.emit(state)
+
+    def send_back(
+        self,
+        jot_id: JotId,
+        note: Annotated[str, typer.Argument(help="What to change")],
+        *,
+        now: Now = False,
+        json: Json = False,
+    ) -> None:
+        """Re-plan a plan, or rework a result, with your note."""
+        with self.cli.host(json=json) as host:
+            state = Control(host, self.actor()).send_back(jot_id, note, now=now)
+        self.emit(state)
+
+    def retry(self, jot_id: JotId, *, now: Now = False, json: Json = False) -> None:
+        """Run again after a failure or questions."""
+        with self.cli.host(json=json) as host:
+            state = Control(host, self.actor()).retry(jot_id, now=now)
+        self.emit(state)
+
+    def cancel(self, jot_id: JotId, *, json: Json = False) -> None:
+        """Stop a queued or running run."""
+        with self.cli.host(json=json) as host:
+            state = Control(host, self.actor()).cancel(jot_id)
+        self.emit(state)
+
+    def log(self, jot_id: JotId, *, json: Json = False) -> None:
+        """Show the latest run's log."""
+        with self.cli.host(json=json) as host:
+            events = Control(host, self.actor()).log(jot_id)
+        self.cli.emit(events, dumps(events) + "\n")
+
+    def repos(
+        self,
+        *,
+        set_: Annotated[
+            list[str] | None,
+            typer.Option("--set", help="project=path (repeatable)"),
+        ] = None,
+        unset: Annotated[
+            list[str] | None, typer.Option("--unset", help="Project (repeatable)")
+        ] = None,
+        default: Annotated[
+            str | None,
+            typer.Option("--default", help="Repository for other jots ('' clears)"),
+        ] = None,
+        from_import: Annotated[
+            bool,
+            typer.Option("--from-import", help="Fill from v0.1 project repo paths"),
+        ] = False,
+        json: Json = False,
+    ) -> None:
+        """Show or change which repository each project's jots run in."""
+        updates: dict[str, str | None] = {}
+        for slug in unset or []:
+            updates[slug] = None
+        with self.cli.host(json=json) as host:
+            for pair in set_ or []:
+                slug, sep, path = pair.partition("=")
+                if not sep or not slug or not path:
+                    raise InvalidInputError(f"Use --set project=path, not {pair!r}")
+                updates[slug] = path
+            control = Control(host, self.actor())
+            changed = bool(updates) or default is not None or from_import
+            settings = (
+                control.repos(updates, default=default, from_import=from_import)
+                if changed
+                else control.settings
+            )
+        rows = [f"{slug}  {path}\n" for slug, path in sorted(settings.repos.items())]
+        if settings.default_repo:
+            rows.append(f"(default)  {settings.default_repo}\n")
+        self.cli.emit(settings, "".join(rows) or "No repositories mapped\n")
+
+    def clean(
+        self,
+        jot_id: JotId,
+        *,
+        force: Annotated[
+            bool, typer.Option("--force", help="Discard uncommitted changes")
+        ] = False,
+        json: Json = False,
+    ) -> None:
+        """Remove a jot's worktree (its branch stays)."""
+        with self.cli.host(json=json) as host:
+            workspace = Control(host, self.actor()).clean(jot_id, force=force)
+            state = Claims(host.session).state(jot_id)
+        self.cli.emit(state, f"Removed {workspace.path}\n")
