@@ -1,6 +1,6 @@
 # Plugins
 
-Plugins add behavior to Jot without changing the core. A plugin can react to every change, keep private state, run background jobs, store validated settings, and add UI. Jot ships `rules`, the `harness` family (one interface over coding-agent CLIs), and `triage`, which tidies new jots through the harness. Execution is planned as a plugin too.
+Plugins add behavior to Jot without changing the core. A plugin can react to every change, keep private state, run background jobs, store validated settings, and add UI. Jot ships `rules`, the `harness` family (one interface over coding-agent CLIs), `triage`, which tidies new jots through the harness, and `execution`, which lets agents claim and hand back work (its runner is in progress).
 
 ## Using plugins
 
@@ -162,6 +162,34 @@ The jot ends up labelled `triaged`, plus `needs-input` when confidence is below 
 
 Settings: `profiles` (which profiles to triage, empty means all), `guidance` (instructions to the model), `min_confidence` (0.6), `rewrite_title` (true), `create_projects` (false), `max_labels` (5), `max_attempts` (3). Pick the backend and model with a harness route: `{"routes": {"triage": {"harness": "claude", "model": "..."}}}`.
 
+## Execution
+
+`execution` lets agents (in their own sessions, or Jot's runner later) work jots safely. See the [design](https://claude.ai/artifact/Hz6i9sk6T5gPLSLgWw3gMm) for the full plan; this release ships claims.
+
+```bash
+jot plugin enable execution
+jot work next -n 5                               # ready jots in rank order
+jot work claim 12 --agent bot-1 [--direct]       # exit 3 if another agent holds it
+jot work heartbeat 12 --agent bot-1              # extend the lease
+jot work release 12 --agent bot-1 --phase awaiting_approval --note "plan..."
+jot work approve 12                              # owner: let the plan run
+jot work state 12
+```
+
+A claim is stored in `metadata.execution` with the agent, lease expiry, and a generation that rises when another agent takes over an expired claim. Claims are written in one serialized transaction with a version check, so two agents racing for a jot get one winner. The default lease is 30 minutes (`lease_seconds`).
+
+| Phase | Label | Status category | Who acts |
+| --- | --- | --- | --- |
+| idle | | open | an agent may claim |
+| planning, executing | | active | the claiming agent |
+| needs_input | `needs-input` | active | owner answers |
+| awaiting_approval | `awaiting-approval` | active | owner runs `jot work approve` |
+| approved | `approved` | active | an agent may claim (goes to executing) |
+| review | `review` | active | owner accepts or sends back |
+| done | | done | |
+
+`jot work next` lists jots that are idle, approved, or running with an expired lease, not blocked by an open jot through a `blocks` link, and in a profile that allows `execution`. Jots imported from v0.1 with `review`, `awaiting-approval` or `needs-input` labels start in those phases.
+
 ## Writing a plugin
 
 A plugin is a `jot.plugins.api.Plugin` subclass published under the `jot.plugins` entry-point group:
@@ -220,7 +248,7 @@ class DigestPlugin(Plugin):
 | Metadata | Store plugin data on jots under a metadata namespace named after the plugin (`metadata.<id>`). |
 | Services | `provides` and `requires` list service names with a major version (`harness@1`). A plugin can't be enabled until every required service has an enabled provider, and a provider can't be disabled while an enabled plugin depends on it. `service(name, context)` returns the provided object; consumers call `context.service(name)` (the first enabled provider by id) or `context.services(name)` (all of them). |
 | `listens` | `False` skips the event feed entirely, for plugins that only provide services. |
-| `commands(cli)` | Return a Typer app to mount as `jot <id> ...`. `cli.host(json=...)` opens the data home with a plugin host; `cli.emit(value, text)` prints JSON or text. |
+| `commands(cli)` | Return a Typer app to mount as `jot <id> ...` (or `jot <command> ...` when the class sets `command`). `cli.host(json=...)` opens the data home with a plugin host; `cli.emit(value, text)` prints JSON or text. |
 | `api` | Targets host API `1`. A mismatch makes the plugin show as broken. |
 
 ### UI
