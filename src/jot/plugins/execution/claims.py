@@ -267,7 +267,13 @@ class Claims:
                 )
             return state
 
-    def approve(self, jot_id: int, actor: str, text: str = "Approved.") -> WorkState:
+    def approve(
+        self,
+        jot_id: int,
+        actor: str,
+        text: str = "Approved.",
+        extra: Metadata | None = None,
+    ) -> WorkState:
         """Approve a plan: an agent may now claim the jot for execution."""
         with self.session.db.write():
             jot = self.session.queries.get(jot_id)
@@ -276,7 +282,7 @@ class Claims:
                 raise InvalidInputError(
                     f"Jot {jot_id} is {self.words(phase)}, not awaiting approval"
                 )
-            state = self._move(jot, Phase.APPROVED, None, actor=actor)
+            state = self._move(jot, Phase.APPROVED, None, actor=actor, extra=extra)
             self._commands(actor, "approve").comment(
                 jot_id, text, kind="execution.approval"
             )
@@ -291,7 +297,13 @@ class Claims:
                 jot, self.phase_of(jot), current, actor=agent, extra=extra
             )
 
-    def reopen(self, jot_id: int, actor: str, phase: Phase) -> WorkState:
+    def reopen(
+        self,
+        jot_id: int,
+        actor: str,
+        phase: Phase,
+        extra: Metadata | None = None,
+    ) -> WorkState:
         """Owner: move a jot waiting on them back to idle or approved."""
         if phase not in {Phase.IDLE, Phase.APPROVED}:
             raise InvalidInputError("Reopen to idle or approved")
@@ -302,7 +314,7 @@ class Claims:
                 raise InvalidInputError(
                     f"Jot {jot_id} is {self.words(current)}, not waiting on you"
                 )
-            return self._move(jot, phase, None, actor=actor)
+            return self._move(jot, phase, None, actor=actor, extra=extra)
 
     def reset(self, jot_id: int, actor: str, phase: Phase) -> WorkState:
         """Owner: drop any claim and put the jot in ``phase`` (used by cancel)."""

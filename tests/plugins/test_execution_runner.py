@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -11,7 +12,8 @@ from pydantic import JsonValue
 from tests.cli.test_cli import data, jot
 from tests.plugins.conftest import USER, FakeClock
 
-from jot.exceptions import InvalidInputError
+from jot.app.commands import JotPatch
+from jot.exceptions import ConflictError, InvalidInputError
 from jot.plugins.api import JobStatus
 from jot.plugins.execution import (
     AGENT,
@@ -19,6 +21,14 @@ from jot.plugins.execution import (
     Control,
     ExecutionPlugin,
     Phase,
+)
+from jot.plugins.execution.contract import (
+    SPEND_KEY,
+    Budget,
+    CapError,
+    Evidence,
+    Keepalive,
+    today,
 )
 from jot.plugins.execution.runner import Answer, Question, RunLog, Runner, dumps
 from jot.plugins.execution.workspace import Git, Workspace, WorkspaceError
@@ -320,7 +330,7 @@ class TestFailures:
         session: Session,
         clock: FakeClock,
     ) -> None:
-        """Three failed attempts leave the jot needing input with the error."""
+        """The same error twice stops retrying and hands the jot back."""
         host.configure("harness-fake", {"fail": True}, USER)
         control.start(task)
         for _ in range(3):
@@ -328,7 +338,7 @@ class TestFailures:
             clock.advance(60)
         job = host.jobs(plugin_id="execution")[0]
         assert job.status == JobStatus.DONE
-        assert job.attempts == 3
+        assert job.attempts == 2
         assert Claims(session).state(task).phase == Phase.NEEDS_INPUT
         assert record(session, task)["outcome"] == "failed"
         note = session.queries.comments(task)[-1]
@@ -698,3 +708,261 @@ class TestWorkRunnerCommands:
         assert "approved" in jot("work", "retry", "1")
         assert "approved" in jot("work", "cancel", "1")
         assert "approved" in jot("work", "run", "1", "--direct")
+
+
+class Steps:
+    """A monotonic clock that jumps forward on every read."""
+
+    def __init__(self, step: float) -> None:
+        self.at = 0.0
+        self.step = step
+
+    def __call__(self) -> float:
+        """Now, then advance."""
+        self.at += self.step
+        return self.at
+
+
+class TestBudget:
+    """Cost and time caps."""
+
+    @staticmethod
+    def budget(
+        host: PluginHost, monotonic: Steps | None = None, **caps: float
+    ) -> Budget:
+        """A budget over the execution plugin's state."""
+        values = {"max_cost": 2.0, "max_minutes": 30.0, "daily_cost": 20.0} | caps
+        return Budget(
+            host.context_for("execution").state,
+            max_cost=values["max_cost"],
+            max_minutes=values["max_minutes"],
+            daily_cost=values["daily_cost"],
+            monotonic=monotonic or Steps(0),
+            day=lambda: "2026-11-06",
+        )
+
+    def test_cost_cap_stops_at_the_next_step(self, host: PluginHost) -> None:
+        """Usage over the cap stops the next step, never the result."""
+        budget = self.budget(host)
+        budget.start()
+        budget.observe(HarnessEvent(kind=EventKind.USAGE, usage=Usage(cost_usd=2.5)))
+        budget.observe(HarnessEvent(kind=EventKind.RESULT, text="done"))
+        with pytest.raises(CapError, match=r"\$2.50, over the \$2.00 cap"):
+            budget.observe(HarnessEvent(kind=EventKind.TEXT, text="more"))
+        assert budget.settle() == 2.5
+        assert budget.settle() == 2.5
+        assert host.context_for("execution").state.get("spend:2026-11-06") == 2.5
+
+    def test_daily_cap(self, host: PluginHost) -> None:
+        """The daily cap refuses new attempts and stops running ones."""
+        state = host.context_for("execution").state
+        state.set("spend:2026-11-06", 19.5)
+        budget = self.budget(host)
+        budget.start()
+        budget.observe(HarnessEvent(kind=EventKind.USAGE, usage=Usage(cost_usd=1)))
+        with pytest.raises(CapError, match="daily"):
+            budget.observe(HarnessEvent(kind=EventKind.TOOL, text="x"))
+        budget.settle()
+        with pytest.raises(CapError, match=r"Daily spend cap \$20.00 reached"):
+            self.budget(host).start()
+
+    def test_time_cap_and_no_caps(self, host: PluginHost) -> None:
+        """Minutes count from the start; zero disables a cap."""
+        slow = self.budget(host, Steps(60 * 31))
+        with pytest.raises(CapError, match="minute cap"):
+            slow.observe(HarnessEvent(kind=EventKind.TOOL, text="x"))
+        free = self.budget(
+            host, Steps(60 * 999), max_cost=0, max_minutes=0, daily_cost=0
+        )
+        free.start()
+        free.observe(HarnessEvent(kind=EventKind.USAGE, usage=Usage(cost_usd=99)))
+        free.observe(HarnessEvent(kind=EventKind.USAGE))
+        free.observe(HarnessEvent(kind=EventKind.TOOL, text="x"))
+        assert self.budget(host).settle() == 0
+
+    def test_runner_cost_cap(
+        self, host: PluginHost, control: Control, task: int, session: Session
+    ) -> None:
+        """A run over its cost cap stops, keeps partial work, and is not retried."""
+        reply(host, DONE, files={"README.md": "partial\n"}, cost_usd=5.0)
+        assert control.start(task, direct=True, now=True).phase == Phase.NEEDS_INPUT
+        stored = record(session, task)
+        assert stored["outcome"] == "capped"
+        assert "cap per attempt" in session.queries.comments(task)[-1].body
+        branch = str(stored["branch"])
+        message = Git(Path(str(stored["worktree"])))("log", "-1", "--format=%s", branch)
+        assert message.endswith("(partial, stopped at a cap)")
+        spent = host.context_for("execution").state.get(SPEND_KEY + today())
+        assert spent == 5.0
+
+    def test_daily_cap_refuses_runs(
+        self, host: PluginHost, control: Control, task: int, session: Session
+    ) -> None:
+        """With today's budget spent, runs hand back without calling the agent."""
+        host.context_for("execution").state.set(SPEND_KEY + today(), 25.0)
+        reply(host, PLAN)
+        assert control.start(task, now=True).phase == Phase.NEEDS_INPUT
+        assert "Daily spend cap" in session.queries.comments(task)[-1].body
+
+    def test_runner_time_cap(
+        self, host: PluginHost, control: Control, task: int, session: Session
+    ) -> None:
+        """A run past its time cap is stopped."""
+        reply(host, PLAN)
+        runner = Runner(
+            host.context_for("execution"), control.settings, monotonic=Steps(60 * 20)
+        )
+        result = Control.attempt(runner, task, "plan", direct=False, last=False)
+        assert isinstance(result, dict)
+        assert "minute cap" in str(result["capped"])
+        assert Claims(session).state(task).phase == Phase.NEEDS_INPUT
+
+
+class TestKeepalive:
+    """Background lease extension."""
+
+    def test_beats_and_stops_on_lost_lease(self) -> None:
+        """Beats repeat; a lost lease is reported by check()."""
+        beats: list[int] = []
+
+        def beat() -> None:
+            beats.append(1)
+            if len(beats) == 3:
+                raise ConflictError("lost")
+
+        with Keepalive(beat, 0.01) as keepalive:
+            for _ in range(200):
+                if keepalive.error is not None:
+                    break
+                threading.Event().wait(0.01)
+        assert len(beats) == 3
+        with pytest.raises(ConflictError, match="lost"):
+            keepalive.check()
+
+    def test_beat_extends_job_and_claim(
+        self, host: PluginHost, control: Control, task: int, session: Session
+    ) -> None:
+        """The thread's heartbeat uses its own session and extends both leases."""
+        context = host.context_for("execution")
+        context.enqueue("plan", jot_id=task)
+        with session.db.write():
+            job = host.store.claim(["execution"], host.clock(), host.lease)
+        assert job is not None
+        runner = Runner(
+            host.context_for("execution", job=job), control.settings, keepalive=0.01
+        )
+        assert runner.keepalive == 0.01
+        Claims(session).claim(task, AGENT, lease=60)
+        before = Claims(session).state(task).claim
+        threading.Event().wait(0.01)
+        runner.beat_for(task)()
+        after = Claims(session).state(task).claim
+        assert before is not None
+        assert after is not None
+        assert after.lease_until > before.lease_until
+        host.cancel(job.id)
+        with pytest.raises(ConflictError, match="no longer leased"):
+            runner.beat_for(task)()
+
+
+class TestContract:
+    """Approval binding, evidence, repair cycles, and direct settings."""
+
+    def test_edit_after_approval_needs_new_approval(
+        self, host: PluginHost, control: Control, task: int, session: Session
+    ) -> None:
+        """Changing the jot after approval sends it back for approval."""
+        reply(host, PLAN)
+        control.start(task, now=True)
+        control.approve(task)
+        session.commands(USER).update(task, JotPatch(title="Say goodbye"))
+        host.run_jobs()
+        state = Claims(session).state(task)
+        assert state.phase == Phase.AWAITING_APPROVAL
+        assert record(session, task)["approved"] is None
+        assert "changed after its plan was approved" in (
+            session.queries.comments(task)[-1].body
+        )
+        reply(host, DONE)
+        assert control.approve(task, now=True).phase == Phase.REVIEW
+
+    def test_unverified_results_are_repaired_then_reviewed(
+        self, host: PluginHost, control: Control, task: int, session: Session
+    ) -> None:
+        """No verification: two repair cycles, then review as needs_more_work."""
+        reply(host, {**DONE, "verification": "none"})
+        assert control.start(task, direct=True, now=True).phase == Phase.REVIEW
+        stored = record(session, task)
+        assert (stored["outcome"], stored["repairs"]) == ("needs_more_work", 2)
+        feedback = [
+            c.body
+            for c in session.queries.comments(task)
+            if c.kind == "execution.feedback"
+        ]
+        assert len(feedback) == 2
+        assert feedback[1].startswith("Repair cycle 2 of 2")
+        assert kinds(session, task).count("execution.result") == 3
+        reply(host, DONE)
+        assert control.send_back(task, "verify it", now=True).phase == Phase.REVIEW
+        assert record(session, task)["outcome"] == "completed"
+
+    def test_repairs_as_jobs(
+        self, host: PluginHost, control: Control, task: int, session: Session
+    ) -> None:
+        """Queued runs repair through follow-up jobs."""
+        host.configure(
+            "execution",
+            control.settings.model_dump(mode="json") | {"repair_cycles": 1},
+            USER,
+        )
+        reply(host, {**DONE, "verification": ""})
+        control.start(task, direct=True)
+        assert host.run_jobs() == 2
+        results = [job.result for job in host.jobs(plugin_id="execution")]
+        assert {"repair": 1} in results
+        assert record(session, task)["repairs"] == 1
+
+    def test_verified_needs_a_shell(
+        self, host: PluginHost, control: Control, task: int, session: Session
+    ) -> None:
+        """Results are verified only when the agent could run checks."""
+        reply(host, DONE)
+        control.start(task, direct=True, now=True)
+        assert record(session, task)["verified"] is False
+        assert "unverified: no shell" in session.queries.comments(task)[-1].body
+        host.configure(
+            "execution",
+            control.settings.model_dump(mode="json") | {"allow_shell": ["web"]},
+            USER,
+        )
+        control.send_back(task, "again", now=True)
+        assert record(session, task)["verified"] is True
+
+    def test_direct_by_project_and_label(
+        self, host: PluginHost, control: Control, commands: Commands, session: Session
+    ) -> None:
+        """Projects and a label can skip planning; resumes stay direct."""
+        labelled = commands.create(
+            title="Quick", profile="task", project="web", labels=["direct"]
+        ).id
+        reply(host, {**DONE, "questions": ["Sure?"]})
+        assert control.start(labelled, now=True).phase == Phase.NEEDS_INPUT
+        assert record(session, labelled)["direct"] is True
+        question = session.queries.comments(labelled)[-1]
+        reply(host, DONE)
+        assert control.answer(labelled, question.id, "yes", now=True).phase == (
+            Phase.REVIEW
+        )
+        host.configure(
+            "execution",
+            control.settings.model_dump(mode="json") | {"direct_projects": ["web"]},
+            USER,
+        )
+        other = commands.create(title="Other", profile="task", project="web").id
+        assert control.start(other, now=True).phase == Phase.REVIEW
+
+    def test_evidence(self) -> None:
+        """Vague verification does not complete a result."""
+        assert Evidence.outcome("completed", " N/A ") == "needs_more_work"
+        assert Evidence.outcome("completed", "pytest: 3 passed") == "completed"
+        assert Evidence.outcome("cannot_proceed", "") == "cannot_proceed"

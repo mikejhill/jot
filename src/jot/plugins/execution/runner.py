@@ -27,6 +27,14 @@ from jot.plugins.execution.claims import (
     Phase,
     WorkState,
 )
+from jot.plugins.execution.contract import (
+    KEEPALIVE_SECONDS,
+    Budget,
+    CapError,
+    Evidence,
+    Keepalive,
+    today,
+)
 from jot.plugins.execution.workspace import Workspace
 from jot.plugins.harness import SERVICE, HarnessService
 from jot.plugins.harness.api import (
@@ -36,9 +44,11 @@ from jot.plugins.harness.api import (
     HarnessEvent,
     Permission,
     RunRequest,
+    integer,
     obj,
     text_of,
 )
+from jot.plugins.store import PluginStore
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -47,7 +57,6 @@ if TYPE_CHECKING:
     from jot.plugins.context import PluginContext
 
 AGENT = "plugin:execution"
-HEARTBEAT_SECONDS = 15.0
 MAX_QUESTIONS = 10
 MAX_CHOICES = 8
 HISTORY = 30
@@ -192,29 +201,55 @@ class ExecutionSettings(Record):
     )
     plan_guidance: str = PLAN_GUIDANCE
     execute_guidance: str = EXECUTE_GUIDANCE
+    max_cost_usd: float = Field(
+        default=2.0, ge=0, description="Cost cap per attempt in USD (0: none)"
+    )
+    max_minutes: float = Field(
+        default=30, ge=0, description="Time cap per attempt in minutes (0: none)"
+    )
+    daily_cost_usd: float = Field(
+        default=20.0, ge=0, description="Spend cap per UTC day in USD (0: none)"
+    )
+    repair_cycles: int = Field(
+        default=2,
+        ge=0,
+        le=5,
+        description="Automatic reruns when a result lacks verification",
+    )
+    direct_projects: list[str] = Field(
+        default_factory=list, description="Projects that skip planning"
+    )
+    direct_label: str = Field(
+        default="direct", description="Jots with this label skip planning"
+    )
 
 
 class Runner:
     """Run the plan and execute phases for one jot at a time."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 - clocks and intervals are injectable for tests
         self,
         context: PluginContext,
         settings: ExecutionSettings,
         *,
         name: str = "job",
         monotonic: Callable[[], float] = time.monotonic,
+        day: Callable[[], str] = today,
+        keepalive: float | None = None,
     ) -> None:
         self.context = context
         self.settings = settings
         self.name = name
         self.monotonic = monotonic
+        self.day = day
+        lease = context.lease / 3 if context.job is not None else KEEPALIVE_SECONDS
+        self.keepalive = keepalive or min(KEEPALIVE_SECONDS, lease)
+        self.cost = 0.0
         self.claims = Claims(
             context.session,
             correlation_id=context.correlation_id,
             origin=Origin.PLUGIN,
         )
-        self._beat = 0.0
 
     # Configuration --------------------------------------------------------------
 
@@ -297,32 +332,68 @@ class Runner:
 
     # Running -------------------------------------------------------------------
 
-    def heartbeat(self, jot_id: int, *, force: bool = False) -> None:
+    def heartbeat(self, jot_id: int) -> None:
         """Extend the job lease and the jot claim; raise when either was lost."""
-        now = self.monotonic()
-        if not force and now - self._beat < HEARTBEAT_SECONDS:
-            return
-        self._beat = now
         if self.context.job is not None:
             self.context.heartbeat()
         self.claims.heartbeat(jot_id, AGENT, lease=self.settings.lease_seconds)
 
+    def beat_for(self, jot_id: int) -> Callable[[], None]:
+        """A heartbeat that opens its own session (for the keepalive thread)."""
+        from jot.app.session import Session  # noqa: PLC0415 - thread-local session
+
+        home = self.context.session.home
+        job = self.context.job
+        clock = self.context.clock
+        job_lease = self.context.lease
+        lease = self.settings.lease_seconds
+
+        def beat() -> None:
+            """Extend both leases from a fresh connection."""
+            with Session.open(home) as session:
+                if job is not None:
+                    with session.db.write():
+                        PluginStore(session.db).heartbeat(
+                            job.id, job.attempts, clock() + job_lease
+                        )
+                Claims(session, origin=Origin.PLUGIN).heartbeat(
+                    jot_id, AGENT, lease=lease
+                )
+
+        return beat
+
+    def budget(self) -> Budget:
+        """Caps for one attempt."""
+        return Budget(
+            self.context.state,
+            max_cost=self.settings.max_cost_usd,
+            max_minutes=self.settings.max_minutes,
+            daily_cost=self.settings.daily_cost_usd,
+            monotonic=self.monotonic,
+            day=self.day,
+        )
+
     def stream(
         self, jot_id: int, request: RunRequest, action: str, log: RunLog
     ) -> HarnessEvent:
-        """Run the agent, logging every event; return the final result."""
+        """Run the agent within the caps, logging every event; return the result."""
+        budget = self.budget()
+        budget.start()
         events: Iterator[HarnessEvent] = self.harness().run(request, action=action)
         final: HarnessEvent | None = None
         try:
-            for event in events:
-                log.write(event)
-                if event.kind == EventKind.RESULT:
-                    final = event
-                self.heartbeat(jot_id)
+            with Keepalive(self.beat_for(jot_id), self.keepalive) as keepalive:
+                for event in events:
+                    log.write(event)
+                    if event.kind == EventKind.RESULT:
+                        final = event
+                    keepalive.check()
+                    budget.observe(event)
         finally:
             close = getattr(events, "close", None)
             if callable(close):
                 close()
+            self.cost = budget.settle()
         if final is None:
             raise HarnessError("The agent ended without a result")
         if final.is_error:
@@ -363,8 +434,11 @@ class Runner:
         jot = self.context.queries.get(jot_id)
         repo = Workspace.check_repo(self.repo_for(jot))
         log = self.log_for(jot_id, Phase.PLANNING)
-        self.claims.annotate(jot_id, AGENT, {"runner": True, "log": str(log.path)})
-        self._beat = self.monotonic()
+        self.claims.annotate(
+            jot_id,
+            AGENT,
+            {"runner": True, "log": str(log.path), "direct": False, "repairs": 0},
+        )
         final = self.stream(
             jot_id,
             RunRequest(
@@ -377,7 +451,7 @@ class Runner:
             log,
         )
         answer = Answer.parse(final.text)
-        extra: Metadata = {"model": final.model}
+        extra: Metadata = {"model": final.model, "last_error": None}
         if answer.questions:
             return self.ask(jot_id, answer.questions, Phase.PLANNING, extra)
         parts = [part for part in (answer.summary, answer.plan) if part]
@@ -405,6 +479,16 @@ class Runner:
             )
         jot = self.context.queries.get(jot_id)
         record = Claims.record_of(jot)
+        direct = direct or record.get("direct") is True
+        if not direct and not self.still_approved(jot, record):
+            return self.claims.release(
+                jot_id,
+                AGENT,
+                Phase.AWAITING_APPROVAL,
+                note="The jot changed after its plan was approved; "
+                f"review the plan and run `jot work approve {jot_id}` again.",
+                extra={"approved": None},
+            )
         workspace = self.workspace(jot)
         base = text_of(record.get("base"))
         started = workspace.ensure()
@@ -419,36 +503,59 @@ class Runner:
                 "worktree": str(workspace.path),
                 "branch": workspace.branch,
                 "base": base,
+                "direct": direct,
             },
         )
         session = text_of(record.get("session")) or None
         if session and not self.harness().resumable(RUN_ACTION):
             session = None
         plan = self.approved_plan(jot)
-        self._beat = self.monotonic()
-        final = self.stream(
-            jot_id,
-            RunRequest(
-                prompt=self.prompt(
-                    jot, self.settings.execute_guidance, EXECUTE_REPLY, plan
+        message = f"jot #{jot_id}: {jot.title}"
+        try:
+            final = self.stream(
+                jot_id,
+                RunRequest(
+                    prompt=self.prompt(
+                        jot, self.settings.execute_guidance, EXECUTE_REPLY, plan
+                    ),
+                    cwd=str(workspace.path),
+                    permission=self.permission(jot),
+                    system=SYSTEM,
+                    session_id=session,
                 ),
-                cwd=str(workspace.path),
-                permission=self.permission(jot),
-                system=SYSTEM,
-                session_id=session,
-            ),
-            RUN_ACTION,
-            log,
-        )
+                RUN_ACTION,
+                log,
+            )
+        except CapError:
+            self.heartbeat(jot_id)
+            workspace.commit_pending(f"{message} (partial, stopped at a cap)")
+            raise
         answer = Answer.parse(final.text)
-        self.heartbeat(jot_id, force=True)
-        workspace.commit_pending(f"jot #{jot_id}: {jot.title}")
-        extra: Metadata = {"model": final.model, "session": final.session_id}
+        self.heartbeat(jot_id)
+        workspace.commit_pending(message)
+        extra: Metadata = {
+            "model": final.model,
+            "session": final.session_id,
+            "cost_usd": round(self.cost, 6),
+            "last_error": None,
+        }
         if answer.questions:
             return self.ask(jot_id, answer.questions, Phase.EXECUTING, extra)
         return self.finish(
             jot_id, workspace=workspace, base=base, answer=answer, log=log, extra=extra
         )
+
+    def still_approved(self, jot: Jot, record: Metadata) -> bool:
+        """Whether the approval still matches the plan, title, and body.
+
+        Only runner plans carry a revision; an approval of someone else's
+        plan is taken as given.
+        """
+        plan = obj(record.get("plan"))
+        comment = integer(plan.get("comment"))
+        if record.get("runner") is not True or comment is None:
+            return True
+        return text_of(record.get("approved")) == self.revision(jot, comment)
 
     def approved_plan(self, jot: Jot) -> str:
         """The latest plan, for the execute prompt."""
@@ -472,11 +579,15 @@ class Runner:
         """Record the result and hand the jot back for review."""
         commits = workspace.commits(base)
         stat = workspace.diffstat(base)
-        outcome = answer.outcome
+        outcome = Evidence.outcome(answer.outcome, answer.verification)
+        shell = self.permission(self.context.queries.get(jot_id)) == Permission.FULL
+        verification = answer.verification or "none reported"
+        if not shell:
+            verification += " (unverified: no shell; add the project to allow_shell)"
         lines = [
             f"**Outcome:** {outcome.replace('_', ' ')}",
             answer.summary or "(no summary)",
-            f"**Verification:** {answer.verification or 'none reported'}",
+            f"**Verification:** {verification}",
             f"**Branch:** `{workspace.branch}` in `{workspace.path}`",
         ]
         if commits:
@@ -500,13 +611,54 @@ class Runner:
                 extra=extra
                 | {
                     "outcome": outcome,
+                    "verified": shell and outcome == "completed",
                     "head": workspace.head(),
                     "commits": len(commits),
                     "asked_in": Phase.EXECUTING.value,
                 },
             )
 
-    def give_up(self, jot_id: int, phase: Phase, error: str) -> None:
+    def needs_repair(self, state: WorkState) -> bool:
+        """Whether a result lacks verification and repair cycles remain."""
+        if state.phase != Phase.REVIEW:
+            return False
+        record = Claims.record_of(self.context.queries.get(state.jot_id))
+        repairs = integer(record.get("repairs")) or 0
+        return (
+            record.get("outcome") == "needs_more_work"
+            and repairs < self.settings.repair_cycles
+        )
+
+    def repair(self, jot_id: int) -> int:
+        """Send an unverified result back to the agent; return the cycle number."""
+        record = Claims.record_of(self.context.queries.get(jot_id))
+        cycle = (integer(record.get("repairs")) or 0) + 1
+        commands = self.context.commands("execution: repair")
+        with self.context.session.db.write():
+            commands.comment(
+                jot_id,
+                f"Repair cycle {cycle} of {self.settings.repair_cycles}: the "
+                "result did not show that the work was verified or is complete. "
+                "Finish the work, verify it, and report what you ran.",
+                kind="execution.feedback",
+            )
+            self.claims.reopen(jot_id, AGENT, Phase.APPROVED, extra={"repairs": cycle})
+        return cycle
+
+    def repeated(self, jot_id: int, error: str) -> bool:
+        """Whether this error repeats the last one; remember it either way."""
+        record = Claims.record_of(self.context.queries.get(jot_id))
+        if text_of(record.get("last_error")) == error:
+            return True
+        try:
+            self.claims.annotate(jot_id, AGENT, {"last_error": error})
+        except ConflictError:
+            return False
+        return False
+
+    def give_up(
+        self, jot_id: int, phase: Phase, error: str, outcome: str = "failed"
+    ) -> None:
         """After the last failed attempt: hand the jot to the owner with the error."""
         commands = self.context.commands("execution: failed")
         with self.context.session.db.write():
@@ -515,7 +667,11 @@ class Runner:
                     jot_id,
                     AGENT,
                     Phase.NEEDS_INPUT,
-                    extra={"asked_in": phase.value, "outcome": "failed"},
+                    extra={
+                        "asked_in": phase.value,
+                        "outcome": outcome,
+                        "last_error": None,
+                    },
                 )
             except ConflictError:
                 return  # someone else holds it now (or it was cancelled)

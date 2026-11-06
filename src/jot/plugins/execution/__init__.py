@@ -33,6 +33,7 @@ from jot.plugins.execution.claims import (
     Phase,
     WorkState,
 )
+from jot.plugins.execution.contract import CapError
 from jot.plugins.execution.runner import (
     AGENT,
     ExecutionSettings,
@@ -46,6 +47,7 @@ from jot.plugins.harness.api import HarnessEvent, integer, obj, text_of
 
 if TYPE_CHECKING:
     from jot.app.commands import Commands
+    from jot.core.models import Metadata
     from jot.plugins.api import Job, PluginCli
     from jot.plugins.context import PluginContext
     from jot.plugins.host import PluginHost
@@ -150,13 +152,27 @@ class Control:
                 if kind == PLAN
                 else runner.execute(jot_id, direct=direct)
             )
+            while kind == EXECUTE and runner.needs_repair(state):
+                cycle = runner.repair(jot_id)
+                if runner.context.job is not None:
+                    runner.context.enqueue(
+                        EXECUTE,
+                        {},
+                        jot_id=jot_id,
+                        dedupe_key=f"jot-{jot_id}-repair-{cycle}",
+                    )
+                    return {"repair": cycle}
+                state = runner.execute(jot_id)
         except ConflictError as err:
             return {"stopped": str(err)}  # lease lost or cancelled: write nothing
+        except CapError as err:
+            runner.give_up(jot_id, phase, str(err), outcome="capped")
+            return {"capped": str(err)}
         except InvalidInputError as err:
             runner.give_up(jot_id, phase, str(err))
             return {"failed": str(err)}
         except AppError as err:
-            if not last:
+            if not last and not runner.repeated(jot_id, str(err)):
                 raise
             runner.give_up(jot_id, phase, str(err))
             return {"failed": str(err)}
@@ -198,6 +214,12 @@ class Control:
             raise InvalidInputError(
                 f"Jot {jot_id} is {Claims.words(state.phase)}{held}; not ready to run"
             )
+        settings = self.settings
+        direct = (
+            direct
+            or (jot.project is not None and jot.project in settings.direct_projects)
+            or bool(settings.direct_label and settings.direct_label in jot.labels)
+        )
         phase = Claims.phase_of(jot)
         executing = direct or phase in {Phase.APPROVED, Phase.EXECUTING}
         return self.queue(
@@ -210,9 +232,15 @@ class Control:
         """Approve the plan; queue execution when the runner made it."""
         jot = self.host.session.queries.get(jot_id)
         record = Claims.record_of(jot)
-        revision = text_of(obj(record.get("plan")).get("revision"))
+        plan = obj(record.get("plan"))
+        comment = integer(plan.get("comment"))
+        # Approving binds to the plan and the jot as they are now.
+        revision = Runner.revision(jot, comment) if comment is not None else ""
         text = f"Approved plan {revision}." if revision else "Approved."
-        state = self.claims.approve(jot_id, self.actor, text)
+        extra: Metadata = {"approved": revision or None, "repairs": 0}
+        if revision:
+            extra["plan"] = plan | {"revision": revision}
+        state = self.claims.approve(jot_id, self.actor, text, extra)
         if run if run is not None else record.get("runner") is True:
             self.check_runnable(jot_id)
             return self.queue(jot_id, EXECUTE, now=now)
@@ -263,7 +291,7 @@ class Control:
         if phase == Phase.AWAITING_APPROVAL:
             self.claims.reopen(jot_id, self.actor, Phase.IDLE)
             return self.queue(jot_id, PLAN, now=now)
-        self.claims.reopen(jot_id, self.actor, Phase.APPROVED)
+        self.claims.reopen(jot_id, self.actor, Phase.APPROVED, {"repairs": 0})
         return self.queue(jot_id, EXECUTE, now=now)
 
     def retry(self, jot_id: int, *, now: bool = False) -> WorkState:
