@@ -202,6 +202,35 @@ class TestImport:
         assert session.queries.get(1).project == "jot"
 
 
+class TestSourceIsUntouched:
+    """The v0.1 database and its folder are never written."""
+
+    def test_wal_database_gets_no_side_files(
+        self, source: Path, session: Session
+    ) -> None:
+        """WAL-mode sources are read from a copy: no -shm or -wal appears."""
+        sqlite3.connect(source).execute("PRAGMA journal_mode=WAL").connection.close()
+        before = sorted(p.name for p in source.parent.iterdir())
+        digest_before = digest(source)
+        V01Importer(source).run(session, IMPORT, dry_run=True)
+        assert sorted(p.name for p in source.parent.iterdir()) == before
+        assert digest(source) == digest_before
+
+    def test_uncheckpointed_wal_is_read(self, source: Path, session: Session) -> None:
+        """Committed changes still in the WAL are included."""
+        writer = sqlite3.connect(source)
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        writer.execute("UPDATE tasks SET title = 'Renamed in WAL' WHERE id = 1")
+        writer.commit()
+        try:
+            assert (source.parent / f"{source.name}-wal").stat().st_size > 0
+            V01Importer(source).run(session, IMPORT)
+        finally:
+            writer.close()
+        assert session.queries.get(1).title == "Renamed in WAL"
+
+
 class TestRefusals:
     """Imports that would lose or mix data are refused, atomically."""
 
