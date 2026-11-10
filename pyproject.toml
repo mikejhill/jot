@@ -24,8 +24,8 @@ classifiers = [
 ]
 dependencies = [
     "fastapi>=0.142.2",
-    "pydantic>=2.13.5",
-    "typer>=0.27.2",
+    "pydantic>=2.14.3",
+    "typer>=0.28.0",
     "uvicorn>=0.54.0",
 ]
 
@@ -47,7 +47,7 @@ triage = "jot.plugins.triage:TriagePlugin"
 execution = "jot.plugins.execution:ExecutionPlugin"
 
 [build-system]
-requires = ["uv_build>=0.12.23,<0.13.0"]
+requires = ["uv_build>=0.13.7,<0.14.0"]
 build-backend = "uv_build"
 
 [tool.ruff]
@@ -117,10 +117,10 @@ check = { sequence = ["format-check", "lint", "typecheck", "test"], help = "Run 
 [dependency-groups]
 dev = [
     "httpx>=0.28",
-    "playwright==1.63.0",
-    "poethepoet>=0.48.0",
-    "pytest>=9.1.1",
+    "playwright==1.64.1",
+    "poethepoet>=0.49.0",
+    "pytest>=9.2.0",
     "pytest-cov>=7.1.0",
-    "ruff>=0.16.10",
-    "ty>=0.0.84",
+    "ruff>=0.17.4",
+    "ty>=0.0.99",
 ]
